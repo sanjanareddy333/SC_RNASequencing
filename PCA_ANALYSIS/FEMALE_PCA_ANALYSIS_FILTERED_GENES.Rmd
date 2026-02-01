@@ -1,0 +1,736 @@
+---
+title: "FEMALE_PCA_ANALYSIS_FILTERED_GENES"
+output: html_document
+date: "2026-01-09"
+---
+```{r setup, include=FALSE}
+############################################################
+## FEMALE ONLY: QC + CELL-LEVEL UMAP + SLICE PCA
+## WITH GENE EXCLUSION - CARDIAC, RBC, MT GENES REMOVED
+############################################################
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(Matrix)
+  library(plotly)
+  library(htmlwidgets)
+  library(pheatmap)
+  library(ggrepel)
+})
+
+############################################################
+## 0. PATHS (EDIT IF NEEDED)
+############################################################
+
+root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/NEW_PCA_ANALYSIS_JAN23/FEMALE_PCA_FILTERED_GENES_RESULTS"
+
+female_its2_path <- "~/Desktop/Lab_Streeter_new/DATA/FEMALE/ITS2.csv"
+
+FILE_PREFIX<- "FEMALE_FILTERED_GENES_"
+
+
+female_paths <- list(
+  WT1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control1_filtered_feature_bc_matrix.h5",
+  WT2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control2_filtered_feature_bc_matrix.h5",
+  TG1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group1_filtered_feature_bc_matrix.h5",
+  TG2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group2_filtered_feature_bc_matrix.h5"
+)
+
+## Folder structure
+dir_map <- list(
+  QC = file.path(root_dir, "QC"),
+  Cell_Level = file.path(root_dir, "Cell_Level"),
+  UMAP = file.path(root_dir, "UMAP"),
+  SliceMapping = file.path(root_dir, "SliceMapping"),
+  Slice_PCA = file.path(root_dir, "Slice_PCA"),
+  Loadings = file.path(root_dir, "Loadings"),
+  Heatmaps_GenesExpressed = file.path(root_dir, "Heatmaps_GenesExpressed"),
+  PCA_Heatmaps = file.path(root_dir, "PCA_Heatmaps")
+)
+
+invisible(lapply(dir_map, dir.create, showWarnings = FALSE, recursive = TRUE))
+for (pc in c("PC1","PC2","PC3")) dir.create(file.path(dir_map$PCA_Heatmaps, pc), showWarnings = FALSE)
+
+cat("Saving results to:\n", root_dir, "\n\n")
+```
+```{r helper_functions, include=FALSE}
+############################################################
+## 1. HELPER FUNCTIONS
+############################################################
+
+save_plot <- function(p, filename, width = 7, height = 6, dpi = 300, subdir = NULL) {
+  out_path <- if (is.null(subdir)) file.path(root_dir, filename) else file.path(subdir, filename)
+  ggsave(filename = out_path, plot = p, width = width, height = height, dpi = dpi)
+  invisible(out_path)
+}
+
+clean_barcode <- function(bc) {
+  bc <- sub("^.*_", "", bc)
+  bc <- sub("-\\d+$", "", bc)
+  bc
+}
+
+clean_slice_id <- function(x) {
+  x <- trimws(x)
+  x <- sub("\\s+ITS$", "", x)
+  x
+}
+
+compute_genes_expressed <- function(seu) {
+  counts_mat <- GetAssayData(seu, assay = "RNA", slot = "counts")
+  seu$genes_expressed <- Matrix::colSums(counts_mat > 0)
+  seu
+}
+
+get_genes_to_exclude <- function(all_genes) {
+  ## Explicit gene list
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+  
+  ## Find genes matching exclusion criteria
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes) 
+  ]
+  
+  return(unique(exclude_genes))
+}
+
+make_pseudobulk_by_slice <- function(seu, genes = NULL) {
+  slices <- unique(seu$slice_id)
+  slices <- slices[!is.na(slices)]
+  if (length(slices) < 2) stop("Need >=2 slices for slice-level PCA.")
+
+  if (is.null(genes)) {
+    genes <- rownames(seu)
+  }
+  
+  expr <- GetAssayData(seu, assay = "RNA", slot = "data")[genes, , drop = FALSE]
+  expr <- as.matrix(expr)
+
+  pseudobulk <- matrix(0, nrow = length(genes), ncol = length(slices))
+  rownames(pseudobulk) <- genes
+  colnames(pseudobulk) <- slices
+
+  slice_counts <- data.frame(slice_id = slices, n_cells = NA_integer_)
+
+  for (i in seq_along(slices)) {
+    sl <- slices[i]
+    idx <- which(seu$slice_id == sl)
+    slice_counts$n_cells[i] <- length(idx)
+    if (length(idx) > 0) pseudobulk[, i] <- rowMeans(expr[, idx, drop = FALSE])
+  }
+
+  list(pseudobulk = pseudobulk, slice_counts = slice_counts)
+}
+
+run_slice_pca <- function(pseudobulk) {
+  pca <- prcomp(t(pseudobulk), center = TRUE, scale. = FALSE)
+  var <- (pca$sdev^2 / sum(pca$sdev^2)) * 100
+  list(pca = pca, var = var)
+}
+
+get_pc_genes <- function(pca_obj, pc = "PC1", n = 30) {
+  v <- pca_obj$rotation[, pc]
+  top_pos <- names(sort(v, decreasing = TRUE))[1:n]
+  top_neg <- names(sort(v, decreasing = FALSE))[1:n]
+  unique(c(top_pos, top_neg))
+}
+
+make_z_mat <- function(pseudobulk, genes, slice_order_vec) {
+  genes <- genes[genes %in% rownames(pseudobulk)]
+  slice_order_vec <- slice_order_vec[slice_order_vec %in% colnames(pseudobulk)]
+  mat <- pseudobulk[genes, slice_order_vec, drop = FALSE]
+  mat <- t(scale(t(mat)))
+  mat[is.na(mat)] <- 0
+  mat
+}
+
+save_pc_loadings <- function(pca_obj, out_csv, top_n = 30) {
+  loadings <- pca_obj$rotation
+  get_tbl <- function(pc_name) {
+    pos <- sort(loadings[, pc_name], decreasing = TRUE)[1:top_n]
+    neg <- sort(loadings[, pc_name], decreasing = FALSE)[1:top_n]
+    rbind(
+      data.frame(PC = pc_name, direction = "positive", gene = names(pos), loading = as.numeric(pos)),
+      data.frame(PC = pc_name, direction = "negative", gene = names(neg), loading = as.numeric(neg))
+    )
+  }
+  tbl <- rbind(get_tbl("PC1"), get_tbl("PC2"), get_tbl("PC3"))
+  write.csv(tbl, out_csv, row.names = FALSE)
+  tbl
+}
+
+plot_genes_expressed_heatmap_static_and_interactive <- function(seu, out_png, out_html) {
+  meta_df <- seu[[]] %>%
+    mutate(barcode = rownames(.)) %>%
+    filter(!is.na(slice_id)) %>%
+    select(barcode, slice_id, genes_expressed)
+
+  if (nrow(meta_df) == 0) stop("No rows for heatmap; slice_id missing.")
+
+  slice_order <- meta_df %>%
+    count(slice_id, name = "n_spots") %>%
+    arrange(desc(n_spots)) %>%
+    pull(slice_id)
+
+  meta_df$slice_id <- factor(meta_df$slice_id, levels = slice_order)
+
+  meta_df <- meta_df %>%
+    group_by(slice_id) %>%
+    arrange(genes_expressed) %>%
+    mutate(spot_index = row_number()) %>%
+    ungroup()
+
+  p <- ggplot(
+    meta_df,
+    aes(
+      x = spot_index,
+      y = factor(slice_id, levels = rev(slice_order)),
+      fill = genes_expressed,
+      text = paste0(
+        "Slice: ", slice_id,
+        "<br>Barcode: ", barcode,
+        "<br>Genes expressed: ", genes_expressed
+      )
+    )
+  ) +
+    geom_tile(height = 0.85, color = "white", linewidth = 0.15) +
+    scale_fill_gradientn(
+      colours = c("#7f0000", "#d7301f", "#fc8d59", "#fee08b", "#ffffbf"),
+      name = "genes_expressed"
+    ) +
+    labs(
+      title = "Genes expressed per spot (All slices combined)",
+      x = "Spots (within slice)",
+      y = "Slice ID"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid.major.y = element_line(color = "grey70", linewidth = 0.3),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  ggsave(out_png, p, width = 12, height = 7, dpi = 300)
+
+  p_int <- ggplotly(p, tooltip = "text")
+  saveWidget(p_int, file = out_html, selfcontained = TRUE)
+
+  invisible(p_int)
+}
+```
+```{r load_data, include=FALSE}
+############################################################
+## 3. LOAD DATA + MERGE + FILTER GENES
+############################################################
+
+cat("Loading FEMALE...\n")
+
+female_objs <- lapply(names(female_paths), function(nm) {
+  x <- Read10X_h5(female_paths[[nm]])
+  obj <- CreateSeuratObject(x, project = nm)
+
+  obj$sample <- nm
+  obj$sex <- "Female"
+
+  obj$barcode_clean <- clean_barcode(colnames(obj))
+  obj$barcode_id <- paste(obj$sex, obj$sample, obj$barcode_clean, sep = "_")
+
+  stopifnot(!any(duplicated(obj$barcode_id)))
+  obj
+})
+
+female <- merge(
+  female_objs[[1]],
+  y = female_objs[-1],
+  add.cell.ids = names(female_paths),
+  project = "Female"
+)
+
+## Seurat v5 layer join
+female[["RNA"]] <- JoinLayers(female[["RNA"]])
+
+############################################################
+## FILTER GENES - REMOVE CARDIAC, RBC, MT GENES
+############################################################
+
+cat("\n=== FILTERING GENES ===\n")
+genes_before <- nrow(female)
+cat("Total genes before filtering:", genes_before, "\n")
+
+all_genes <- rownames(female)
+genes_to_exclude <- get_genes_to_exclude(all_genes)
+
+cat("Genes to exclude (n =", length(genes_to_exclude), "):\n")
+print(genes_to_exclude)
+
+genes_to_keep <- setdiff(all_genes, genes_to_exclude)
+cat("\nGenes to keep:", length(genes_to_keep), "\n")
+
+## Physically remove genes from Seurat object
+female <- subset(female, features = genes_to_keep)
+
+genes_after <- nrow(female)
+cat("Total genes after filtering:", genes_after, "\n")
+cat("Genes removed:", genes_before - genes_after, "\n")
+cat("=== GENE FILTERING COMPLETE ===\n\n")
+
+## Write FEMALE metadata CSV
+female_meta_df <- female[[]] %>%
+  mutate(cell_barcode = rownames(.)) %>%
+  select(cell_barcode, everything())
+
+female_csv <- file.path(root_dir, "Female_Metadata_filtered_genes.csv")
+write.csv(female_meta_df, female_csv, row.names = FALSE)
+
+cat("Female metadata saved at:\n", female_csv, "\n")
+
+# Check samples
+table(female$sample)
+
+# Check metadata columns
+colnames(female@meta.data)
+```
+```{r qc_metrics, include=FALSE}
+############################################################
+## 4. QC METRICS + PLOTS
+############################################################
+
+cat("Computing QC metrics...\n")
+female[["percent.mt"]] <- PercentageFeatureSet(female, pattern = "^mt-")
+if (all(female$percent.mt == 0)) {
+  female[["percent.mt"]] <- PercentageFeatureSet(female, pattern = "^MT-")
+}
+
+female <- compute_genes_expressed(female)
+
+## Violin plots by sample
+p_violin_sample <- VlnPlot(
+  female,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  group.by = "sample",
+  pt.size = 0.1,
+  ncol = 3
+)
+
+save_plot(p_violin_sample, paste0(FILE_PREFIX,"QC_Violin_BySample.png"), 12, 5, subdir = dir_map$QC)
+cat("✓ Saved: QC_Violin_BySample.png\n")
+```
+```{r normalize_variable_features, include=FALSE}
+############################################################
+## 5. NORMALIZE + FIND VARIABLE FEATURES
+############################################################
+
+cat("Normalizing and finding variable features...\n")
+female <- NormalizeData(female)
+female <- FindVariableFeatures(female, nfeatures = 2000)
+
+## Plot variable features
+top10 <- head(VariableFeatures(female), 10)
+p_var <- VariableFeaturePlot(female)
+p_var <- LabelPoints(plot = p_var, points = top10, repel = TRUE)
+p_var <- p_var + 
+  labs(
+    title = "Highly Variable Genes (Cardiac/RBC/MT Genes Excluded)",
+    subtitle = paste0("n = ", length(VariableFeatures(female)), " genes")
+  )
+
+
+save_plot(p_var, paste0(FILE_PREFIX,"VariableFeatures.png"), 8, 6, subdir = dir_map$QC)
+cat("✓ Saved: VariableFeatures.png\n")
+p_var
+```
+```{r cell_level_pca_umap, include=FALSE}
+############################################################
+## 6. CELL-LEVEL PCA + ELBOW + UMAP
+############################################################
+
+cat("Scaling data and running cell-level PCA...\n")
+female <- ScaleData(female)
+female <- RunPCA(female, npcs = 30)
+
+p_elbow <- ElbowPlot(female, ndims = 30) +
+  labs(title = "Elbow Plot (Cell-level PCA)")
+
+
+save_plot(p_elbow, paste0(FILE_PREFIX,"ElbowPlot_CellLevel.png"), 7, 5, subdir = dir_map$Cell_Level)
+cat("✓ Saved: ElbowPlot_CellLevel.png\n")
+p_elbow
+
+cat("Running UMAP...\n")
+female <- RunUMAP(female, dims = 1:20)
+
+## UMAP colored by sample
+sample_colors <- c(
+  WT1 = "#1f77b4",  # blue
+  WT2 = "#1f77b4",  # blue
+  TG1 = "#2ca02c",  # green
+  TG2 = "#ff7f0e"   # orange
+)
+
+p_umap_sample <- DimPlot(
+  female,
+  group.by = "sample"
+) +
+  scale_color_manual(values = sample_colors) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "UMAP by Sample (Female)",
+    color = "Sample"
+  )
+save_plot(p_umap_sample, paste0(FILE_PREFIX,"UMAP_BySample.png"), 9, 6, subdir = dir_map$UMAP)
+cat("✓ Saved: UMAP_BySample.png\n")
+
+p_umap_sample
+```
+```{r feature_plots, include=FALSE}
+############################################################
+## 7. FEATURE PLOTS (GENES EXPRESSED, MT%, nFeature)
+############################################################
+
+p_genes <- FeaturePlot(female, features = "genes_expressed", reduction = "umap") +
+  theme_minimal(base_size = 14) +
+  labs(title = "Genes expressed per spot (UMAP)")
+
+save_plot(p_genes, paste0(FILE_PREFIX,"UMAP_GenesExpressed.png"), 7, 6, subdir = dir_map$UMAP)
+cat("✓ Saved: UMAP_GenesExpressed.png\n")
+p_genes
+
+p_mt <- FeaturePlot(female, features = "percent.mt", reduction = "umap") +
+  theme_minimal(base_size = 14) +
+  labs(title = "percent.mt (UMAP)")
+
+save_plot(p_mt, paste0(FILE_PREFIX,"UMAP_percentMT.png"), 7, 6, subdir = dir_map$UMAP)
+cat("✓ Saved: UMAP_percentMT.png\n")
+p_mt
+
+p_nFeature <- FeaturePlot(female, features = "nFeature_RNA", reduction = "umap") +
+  theme_minimal(base_size = 14) +
+  labs(title = "nFeature_RNA (UMAP)")
+
+save_plot(p_nFeature ,paste0(FILE_PREFIX,"UMAP_nFeatureRNA.png"), 7, 6, subdir = dir_map$UMAP)
+cat("✓ Saved: UMAP_nFeatureRNA.png\n")
+p_nFeature
+```
+```{r its2_mapping, include=FALSE}
+############################################################
+## 8. ITS2 MAPPING + SLICE COUNTS
+############################################################
+
+cat("Loading Female ITS2 mapping...\n")
+
+female_its <- read.csv(female_its2_path, stringsAsFactors = FALSE)
+female_its$slice_id <- clean_slice_id(female_its$ITS2)
+
+# ⚠️ VERIFY THIS MAPPING IS CORRECT FOR YOUR EXPERIMENT!
+female_slice_treatment <- data.frame(
+  slice_id = c(
+    "315A", "315B", "312A",           # 3 slices for WT1
+    "317", "312B",                     # 2 slices for WT2
+    "44-3A", "44-3B", "42A", "42B",   # 4 slices for TG1
+    "46-2A", "46-2B", "44-2"          # 3 slices for TG2
+  ),
+  sample_label = c(
+    rep("WT1", 3),
+    rep("WT2", 2),
+    rep("TG1", 4),
+    rep("TG2", 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+female_slice_treatment$slice_id_clean <- clean_slice_id(female_slice_treatment$slice_id)
+
+female_its$sample_label <- female_slice_treatment$sample_label[
+  match(female_its$slice_id, female_slice_treatment$slice_id_clean)
+]
+
+# Drop unmapped
+female_its <- female_its %>% filter(!is.na(sample_label))
+
+female_its$barcode_clean <- clean_barcode(female_its$Barcode)
+
+female_its$barcode_id <- paste(
+  "Female",
+  female_its$sample_label,
+  female_its$barcode_clean,
+  sep = "_"
+)
+
+write.csv(
+  female_its,
+  file.path(dir_map$SliceMapping, "Female_ITS2_with_barcode_id.csv"),
+  row.names = FALSE
+)
+
+# Build slice → treatment mapping for PCA
+female_slice_treatment$slice_id <- clean_slice_id(female_slice_treatment$slice_id)
+
+slice_treatment <- female_slice_treatment %>%
+  rename(treatment = sample_label) %>%
+  distinct(slice_id, treatment)
+
+# Attach slice_id to Seurat
+female$slice_id <- female_its$slice_id[
+  match(female$barcode_id, female_its$barcode_id)
+]
+
+# Save seurat metadata with slice_id
+meta <- female@meta.data
+write.csv(
+  meta,
+  file.path(dir_map$SliceMapping, "female_metadata_wit h_slice_id.csv"),
+  row.names = TRUE
+)
+
+# Slice barcode counts
+slice_barcode_counts <- meta %>%
+  filter(!is.na(slice_id)) %>%
+  count(slice_id, name = "n_barcodes") %>%
+  arrange(desc(n_barcodes))
+
+write.csv(
+  slice_barcode_counts,
+  file.path(dir_map$SliceMapping, "Slice_Barcode_Counts.csv"),
+  row.names = FALSE
+)
+
+cat("Slice barcode counts:\n")
+print(slice_barcode_counts)
+```
+```{r slice_pca, include=FALSE}
+############################################################
+## 9. SLICE-LEVEL PSEUDOBULK + PCA
+############################################################
+
+cat("\nCreating pseudobulk profiles and running slice-level PCA...\n")
+
+## Use variable features for PCA
+var_genes <- VariableFeatures(female)
+pb <- make_pseudobulk_by_slice(female, genes = var_genes)
+pseudobulk <- pb$pseudobulk
+
+cat("Pseudobulk matrix dimensions:", nrow(pseudobulk), "genes x", ncol(pseudobulk), "slices\n")
+
+pca_out <- run_slice_pca(pseudobulk)
+pca_result <- pca_out$pca
+pca_var <- pca_out$var
+
+cat("PC variance explained:\n")
+print(head(pca_var, 10))
+
+pca_df <- data.frame(
+  slice_id = rownames(pca_result$x),
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  PC3 = pca_result$x[, 3],
+  stringsAsFactors = FALSE
+)
+
+pca_df <- left_join(pca_df, slice_treatment, by = "slice_id")
+
+write.csv(pca_df, file.path(dir_map$Slice_PCA, paste0(FILE_PREFIX,"SlicePCA_Coordinates_PC1_PC2_PC3.csv")), row.names = FALSE)
+```
+```{r slice_pca_plots, include=FALSE}
+############################################################
+## 10. SLICE PCA PLOTS (PC1 vs PC2, PC2 vs PC3)
+############################################################
+pca_df_plot <- pca_df %>%
+  mutate(treatment_ellipse = ifelse(treatment %in% c("WT1", "WT2"), "WT", treatment))
+
+treat_colors <- c(
+  WT   = "#1f77b4",  # Combined WT color
+  TG1  = "#2ca02c",  # green
+  TG2  = "#ff7f0e"   # orange
+)
+
+
+p_pc1_pc2 <- ggplot(
+  pca_df_plot,
+  aes(PC1, PC2, color = treatment_ellipse, group = treatment_ellipse)
+) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(aes(label = slice_id), size = 4, color = "black") +
+  stat_ellipse(type = "t", level = 0.95, linewidth = 0.8) +
+  scale_color_manual(values = treat_colors, name = "Treatment Group") +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Slice-level PCA (Female Only)",
+    x = paste0("PC1 (", round(pca_var[1], 1), "%)"),
+    y = paste0("PC2 (", round(pca_var[2], 1), "%)")
+  )
+
+save_plot(p_pc1_pc2, paste0(FILE_PREFIX,"SlicePCA_PC1_vs_PC2_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
+cat("✓ Saved: SlicePCA_PC1_vs_PC2_ByTreatment.png\n")
+p_pc1_pc2
+
+p_pc2_pc3 <- ggplot(
+  pca_df_plot,
+  aes(PC2, PC3, color = treatment_ellipse, group = treatment_ellipse)
+) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(aes(label = slice_id), size = 4, color = "black") +
+  stat_ellipse(type = "t", level = 0.95, linewidth = 0.8) +
+  scale_color_manual(values = treat_colors, name = "Treatment Group") +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Slice-level PCA (Female Only)",
+    x = paste0("PC1 (", round(pca_var[1], 1), "%)"),
+    y = paste0("PC2 (", round(pca_var[2], 1), "%)")
+  )
+
+save_plot(p_pc2_pc3, paste0(FILE_PREFIX,"SlicePCA_PC2_vs_PC3_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
+cat("✓ Saved: SlicePCA_PC2_vs_PC3_ByTreatment.png\n")
+p_pc2_pc3
+```
+```{r pc_loadings, include=FALSE}
+############################################################
+## 11. LOADINGS CSV (PC1 PC2 PC3)
+############################################################
+
+cat("Saving PC loadings...\n")
+loadings_tbl <- save_pc_loadings(
+  pca_result,
+  out_csv = file.path(dir_map$Loadings,paste0(FILE_PREFIX,"Top_PC_Loadings_PC1_PC2_PC3.csv")),
+  top_n = 30
+)
+
+cat("\nTop 5 positive and negative genes for each PC:\n")
+for (pc in c("PC1", "PC2", "PC3")) {
+  cat("\n", pc, ":\n", sep = "")
+  print(loadings_tbl %>% filter(PC == pc) %>% head(5))
+}
+```
+```{r genes_expressed_heatmaps, include=FALSE}
+############################################################
+## 12. GENES EXPRESSED HEATMAPS (STATIC + INTERACTIVE)
+############################################################
+
+cat("\nGenerating genes_expressed heatmaps...\n")
+plot_genes_expressed_heatmap_static_and_interactive(
+  female,
+  out_png  = file.path(dir_map$Heatmaps_GenesExpressed, "Heatmap_GenesExpressed_AllSlices_Static.png"),
+  out_html = file.path(dir_map$Heatmaps_GenesExpressed, "Heatmap_GenesExpressed_AllSlices_Interactive.html")
+)
+cat("✓ Saved: Heatmap_GenesExpressed heatmaps\n")
+```
+```{r pc_gene_heatmaps, include=FALSE}
+############################################################
+## 13. PC GENE HEATMAPS (DEFAULT / BY TREATMENT / BY LIKENESS)
+############################################################
+
+cat("\nGenerating PC gene heatmaps...\n")
+
+pca_df <- pca_df %>%
+  mutate(treatment_ellipse = ifelse(treatment %in% c("WT1", "WT2"), "WT", treatment))
+
+annotation_col <- data.frame(treatment = pca_df$treatment_ellipse)
+rownames(annotation_col) <- pca_df$slice_id
+
+ann_colors <- list(
+  treatment = c(
+    WT  = "#1f77b4",
+    TG1 = "#2ca02c",
+    TG2 = "#ff7f0e"
+  )
+)
+
+
+#ann_colors <- list(treatment = treat_colors)
+
+## Slice order by treatment
+slice_order_treatment <- pca_df %>%
+  filter(!is.na(treatment)) %>%
+  arrange(
+    factor(treatment, levels = c("WT1", "WT2", "TG1", "TG2")), 
+    PC1
+  ) %>%
+  pull(slice_id)
+
+for (pc in c("PC1","PC2","PC3")) {
+
+  cat("  Processing", pc, "heatmaps...\n")
+  
+  genes <- get_pc_genes(pca_result, pc = pc, n = 30)
+
+  ## 1) DEFAULT (cluster both rows and columns)
+  mat_default <- make_z_mat(pseudobulk, genes, colnames(pseudobulk))
+  pheatmap(
+    mat_default,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    annotation_col = annotation_col[colnames(mat_default), , drop = FALSE],
+    annotation_colors = ann_colors,
+    color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
+    main = paste(pc, "top loading genes (Default clustering)"),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Default.png")),
+    width = 9, height = 10
+  )
+
+  ## 2) BY TREATMENT (no column clustering)
+  mat_treat <- make_z_mat(pseudobulk, genes, slice_order_treatment)
+  pheatmap(
+    mat_treat,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    annotation_col = annotation_col[colnames(mat_treat), , drop = FALSE],
+    annotation_colors = ann_colors,
+    color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
+    main = paste(pc, "top loading genes (Ordered by Treatment)"),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_ByTreatment.png")),
+    width = 9, height = 10
+  )
+
+  ## 3) BY LIKENESS (PC score order)
+  slice_order_likeness <- pca_df %>% arrange(.data[[pc]]) %>% pull(slice_id)
+  slice_order_likeness <- slice_order_likeness[slice_order_likeness %in% colnames(pseudobulk)]
+
+  mat_like <- make_z_mat(pseudobulk, genes, slice_order_likeness)
+  pheatmap(
+    mat_like,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    annotation_col = annotation_col[colnames(mat_like), , drop = FALSE],
+    annotation_colors = ann_colors,
+    color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
+    main = paste(pc, "top loading genes (Ordered by PC score)"),
+        filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Score.png")),
+    width = 9, height = 10
+  )
+}
+
+cat("✓ Saved: All PC heatmaps\n")
+```
+```{r save_final, include=FALSE}
+############################################################
+## 14. SAVE FINAL SEURAT OBJECT
+############################################################
+
+cat("\nSaving final Seurat object...\n")
+saveRDS(female, file = file.path(root_dir, "Female_Seurat_filtered.rds"))
+cat("✓ Saved: Female_Seurat_filtered.rds\n")
+
+############################################################
+## 15. SESSION INFO (FOR REPRODUCIBILITY)
+############################################################
+
+cat("\n==============================================\n")
+cat("SESSION INFO\n")
+cat("==============================================\n")
+sessionInfo()
+
+cat("\n✅ ANALYSIS COMPLETE!\n")
+cat("All outputs saved to:", root_dir, "\n")
+cat("==============================================\n")
+```

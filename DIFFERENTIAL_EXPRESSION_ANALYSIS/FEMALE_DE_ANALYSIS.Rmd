@@ -1,0 +1,866 @@
+---
+title: "FEMALE_DE_ANALYSIS"
+output: html_document
+date: "2026-01-23"
+---
+
+```{r setup, include=FALSE}
+############################################################
+## DIFFERENTIAL EXPRESSION ANALYSIS: FEMALE ITS2 DATA
+## Comparing WT vs REV, REV vs RRAC, WT vs RRAC
+############################################################
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(ggVennDiagram)
+  library(gridExtra)
+  library(grid)
+})
+
+############################################################
+## 1. SETUP PATHS AND OUTPUT DIRECTORY
+############################################################
+
+# Input paths
+female_its2_path <- "~/Desktop/Lab_Streeter_new/DATA/FEMALE/ITS2.csv"
+
+female_paths <- list(
+  WT1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control1_filtered_feature_bc_matrix.h5",
+  WT2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control2_filtered_feature_bc_matrix.h5",
+  TG1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group1_filtered_feature_bc_matrix.h5",
+  TG2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group2_filtered_feature_bc_matrix.h5"
+)
+
+# Output directory
+output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/FEMALE_ITS2_DE_RESULTS"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+cat("Output directory:", output_dir, "\n\n")
+
+############################################################
+## 2. HELPER FUNCTIONS
+############################################################
+
+clean_barcode <- function(bc) {
+  bc <- sub("^.*_", "", bc)
+  bc <- sub("-\\d+$", "", bc)
+  bc
+}
+
+clean_slice_id <- function(x) {
+  x <- trimws(x)
+  x <- sub("\\s+ITS$", "", x)
+  x
+}
+
+# Format gene list for display in boxes
+format_gene_box <- function(genes, title, max_genes = 50) {
+  n_genes <- length(genes)
+  if (n_genes == 0) {
+    return(paste0(title, " (n=0):\n  No genes\n"))
+  }
+  
+  genes_to_show <- head(genes, max_genes)
+  gene_text <- paste0("  ", genes_to_show, collapse="\n")
+  
+  if (n_genes > max_genes) {
+    gene_text <- paste0(gene_text, "\n  ... and ", n_genes - max_genes, " more")
+  }
+  
+  paste0(title, " (n=", n_genes, "):\n", gene_text, "\n")
+}
+
+# Format gene list with numbered entries for boxes
+format_gene_list_numbered <- function(genes, max_genes = 10) {
+  n_genes <- length(genes)
+  if (n_genes == 0) return("No genes")
+  
+  genes_to_show <- head(genes, max_genes)
+  gene_lines <- paste0(seq_along(genes_to_show), ". ", genes_to_show)
+  
+  if (n_genes > max_genes) {
+    gene_lines <- c(gene_lines, paste0("... (", n_genes - max_genes, " more)"))
+  }
+  
+  paste(gene_lines, collapse = "\n")
+}
+
+# Volcano plot function with clear left/right labeling
+plot_volcano <- function(de_results, comparison_name, right_group_name, left_group_name, padj_cutoff = 0.05, fc_cutoff = 0.5) {
+  
+  de_results$diffexpressed <- "NO"
+  de_results$diffexpressed[de_results$avg_log2FC > fc_cutoff & de_results$p_val_adj < padj_cutoff] <- "UP"
+  de_results$diffexpressed[de_results$avg_log2FC < -fc_cutoff & de_results$p_val_adj < padj_cutoff] <- "DOWN"
+  
+  # Initialize no labels
+  de_results$delabel <- NA
+  
+  # Top 20 UP genes (positive FC = higher in right group)
+  top_up <- de_results %>%
+    filter(diffexpressed == "UP") %>%
+    arrange(p_val_adj) %>%
+    head(20) %>%
+    rownames()
+  
+  # Top 20 DOWN genes (negative FC = higher in left group)
+  top_down <- de_results %>%
+    filter(diffexpressed == "DOWN") %>%
+    arrange(p_val_adj) %>%
+    head(20) %>%
+    rownames()
+  
+  # Assign labels
+  de_results$delabel[rownames(de_results) %in% c(top_up, top_down)] <-
+    rownames(de_results)[rownames(de_results) %in% c(top_up, top_down)]
+  
+  n_up <- sum(de_results$diffexpressed == "UP")
+  n_down <- sum(de_results$diffexpressed == "DOWN")
+  
+  p <- ggplot(de_results, aes(x = avg_log2FC, y = -log10(p_val_adj), color = diffexpressed, label = delabel)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_vline(xintercept = c(-fc_cutoff, fc_cutoff), linetype = "dashed", color = "grey40") +
+    geom_hline(yintercept = -log10(padj_cutoff), linetype = "dashed", color = "grey40") +
+    geom_text_repel(
+      size = 3,
+      max.overlaps = 20,
+      box.padding = 0.5,
+      segment.color = "grey50"
+    ) +
+    scale_color_manual(
+      values = c("UP" = "#d62728", "DOWN" = "#1f77b4", "NO" = "grey70"),
+      labels = c(
+        "UP" = paste0("Upregulated in ", right_group_name, " (", n_up, ")"),
+        "DOWN" = paste0("Downregulated in ", right_group_name, " (", n_down, ")"),
+        "NO" = "Not significant"
+      )
+    ) +
+    labs(
+      title = paste("Differential Expression:", comparison_name),
+      subtitle = paste0(left_group_name, " (left) vs ", right_group_name, " (right) | FDR < ", padj_cutoff, ", |log2FC| > ", fc_cutoff),
+      x = paste0("log2 Fold Change (", left_group_name, " ← | → ", right_group_name, ")"),
+      y = "-log10(adjusted p-value)",
+      color = "Expression"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+############################################################
+## 3. LOAD DATA
+############################################################
+
+cat("Loading FEMALE data...\n")
+
+female_objs <- lapply(names(female_paths), function(nm) {
+  x <- Read10X_h5(female_paths[[nm]])
+  obj <- CreateSeuratObject(x, project = nm)
+
+  obj$sample <- nm
+  obj$sex <- "Female"
+
+  obj$barcode_clean <- clean_barcode(colnames(obj))
+  obj$barcode_id <- paste(obj$sex, obj$sample, obj$barcode_clean, sep = "_")
+
+  stopifnot(!any(duplicated(obj$barcode_id)))
+  obj
+})
+
+female <- merge(
+  female_objs[[1]],
+  y = female_objs[-1],
+  add.cell.ids = names(female_paths),
+  project = "Female"
+)
+
+## Seurat v5 layer join
+female[["RNA"]] <- JoinLayers(female[["RNA"]])
+
+cat("\n==============================================\n")
+cat("INITIAL DATA LOADED\n")
+cat("==============================================\n")
+cat("Total cells:", ncol(female), "\n")
+cat("Total genes:", nrow(female), "\n")
+cat("Samples:\n")
+print(table(female$sample))
+cat("\n")
+
+
+
+get_genes_to_exclude <- function(all_genes) {
+  ## Explicit gene list
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+  
+  ## Find genes matching exclusion criteria
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes) 
+  ]
+  
+  return(unique(exclude_genes))
+}
+
+
+############################################################
+## 4. LOAD ITS2 MAPPING (USING WORKING APPROACH)
+############################################################
+
+cat("Loading ITS2 mapping for females...\n")
+female_its <- read.csv(female_its2_path, stringsAsFactors = FALSE)
+female_its$slice_id <- clean_slice_id(female_its$ITS2)
+
+cat("ITS2 file columns:\n")
+print(names(female_its))
+cat("\n")
+
+# Define the complete slice to sample mapping (from working code)
+female_slice_treatment <- data.frame(
+  slice_id = c(
+    "315A", "315B", "312A",           # 3 slices for WT1
+    "317", "312B",                     # 2 slices for WT2
+    "44-3A", "44-3B", "42A", "42B",   # 4 slices for TG1
+    "46-2A", "46-2B", "44-2"          # 3 slices for TG2
+  ),
+  sample_label = c(
+    rep("WT1", 3),
+    rep("WT2", 2),
+    rep("TG1", 4),
+    rep("TG2", 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Add treatment group for DE analysis
+# Define which slices we want to use and their treatment groups
+slice_to_treatment_de <- data.frame(
+  slice_id = c(
+    # WT slices
+    "315A", "315B", "312A", "312B", "317",
+    # REV slices (TG1)
+    "42A", "42B", "44-3A", "44-3B",
+    # RRAC slices (TG2)
+    "46-2A", "46-2B", "44-2"
+  ),
+  treatment_group = c(
+    # WT
+    "WT", "WT", "WT", "WT", "WT",
+    # REV
+    "REV", "REV", "REV", "REV",
+    # RRAC
+    "RRAC", "RRAC", "RRAC"
+  ),
+  stringsAsFactors = FALSE
+)
+
+cat("\n==============================================\n")
+cat("SLICE TO TREATMENT MAPPING FOR DE\n")
+cat("==============================================\n")
+print(slice_to_treatment_de)
+cat("\n")
+
+# Clean slice IDs
+female_slice_treatment$slice_id_clean <- clean_slice_id(female_slice_treatment$slice_id)
+
+# Map ITS2 data to sample labels
+female_its$sample_label <- female_slice_treatment$sample_label[
+  match(female_its$slice_id, female_slice_treatment$slice_id_clean)
+]
+
+# Drop unmapped
+female_its <- female_its %>% filter(!is.na(sample_label))
+
+cat("ITS2 rows after filtering to mapped slices:", nrow(female_its), "\n\n")
+
+# Create barcode IDs using sample_label (like working code)
+female_its$barcode_clean <- clean_barcode(female_its$Barcode)
+female_its$barcode_id <- paste(
+  "Female",
+  female_its$sample_label,
+  female_its$barcode_clean,
+  sep = "_"
+)
+
+# Attach slice_id to Seurat object
+female$slice_id <- female_its$slice_id[
+  match(female$barcode_id, female_its$barcode_id)
+]
+
+cat("==============================================\n")
+cat("SLICE MAPPING SUMMARY (ALL SLICES)\n")
+cat("==============================================\n")
+cat("Cells with slice_id:", sum(!is.na(female$slice_id)), "\n")
+cat("Cells without slice_id:", sum(is.na(female$slice_id)), "\n\n")
+
+cat("Distribution of all slices:\n")
+print(table(female$slice_id, useNA = "ifany"))
+cat("\n")
+
+############################################################
+## 5. FILTER TO ONLY SELECTED ITS2 SLICES FOR DE
+############################################################
+
+cat("\n==============================================\n")
+cat("FILTERING TO SELECTED SLICES FOR DE\n")
+cat("==============================================\n")
+
+# Keep only cells from the specified slices
+selected_slices <- slice_to_treatment_de$slice_id
+
+cat("Selected slices for DE analysis:\n")
+print(selected_slices)
+cat("\n")
+
+# Filter
+female_filtered <- subset(female, subset = slice_id %in% selected_slices)
+
+cat("After filtering to selected slices:\n")
+cat("  Total cells:", ncol(female_filtered), "\n")
+cat("  Total genes:", nrow(female_filtered), "\n\n")
+
+# Add treatment group annotation
+female_filtered$treatment_group <- slice_to_treatment_de$treatment_group[
+  match(female_filtered$slice_id, slice_to_treatment_de$slice_id)
+]
+
+cat("Treatment group distribution:\n")
+print(table(female_filtered$treatment_group))
+cat("\n")
+
+cat("Slices per treatment group:\n")
+print(table(female_filtered$slice_id, female_filtered$treatment_group))
+cat("\n")
+
+# Save filtered metadata
+cat("Saving filtered metadata...\n")
+filtered_meta <- female_filtered[[]] %>%
+  mutate(cell_barcode = rownames(.)) %>%
+  select(cell_barcode, everything())
+
+write.csv(
+  filtered_meta,
+  file.path(output_dir, "Female_ITS2_Filtered_Metadata.csv"),
+  row.names = FALSE
+)
+cat("✓ Saved: Female_ITS2_Filtered_Metadata.csv\n\n")
+
+############################################################
+## 6. NORMALIZE AND SCALE
+############################################################
+
+cat("==============================================\n")
+cat("NORMALIZING AND SCALING DATA\n")
+cat("==============================================\n")
+
+female_filtered <- NormalizeData(female_filtered, normalization.method = "LogNormalize")
+female_filtered <- FindVariableFeatures(female_filtered, selection.method = "vst", nfeatures = 2000)
+female_filtered <- ScaleData(female_filtered, features = rownames(female_filtered))
+
+cat("✓ Normalization and scaling complete\n")
+cat("Variable features detected:", length(VariableFeatures(female_filtered)), "\n\n")
+
+############################################################
+## 7. RUN DIFFERENTIAL EXPRESSION ANALYSES
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("RUNNING DIFFERENTIAL EXPRESSION ANALYSES\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+# Set the identity to treatment_group
+Idents(female_filtered) <- "treatment_group"
+
+cat("Active identities:\n")
+print(table(Idents(female_filtered)))
+cat("\n")
+
+## Comparison 1: WT vs REV (WT on left, REV on right)
+## ident.1 = REV (right), ident.2 = WT (left)
+## Positive log2FC = upregulated in REV
+## Negative log2FC = downregulated in REV (upregulated in WT)
+cat("1. Running DE: WT vs REV...\n")
+de_wt_vs_rev <- FindMarkers(
+  female_filtered,
+  ident.1 = "REV",  # Right group
+  ident.2 = "WT",   # Left group
+  min.pct = 0.1,
+  logfc.threshold = 0.25,
+  test.use = "wilcox"
+)
+de_wt_vs_rev$gene <- rownames(de_wt_vs_rev)
+de_wt_vs_rev <- de_wt_vs_rev %>% arrange(p_val_adj)
+
+write.csv(de_wt_vs_rev, file.path(output_dir, "DE_WT_vs_REV.csv"), row.names = FALSE)
+cat("   ✓ Saved: DE_WT_vs_REV.csv\n")
+cat("   Total genes tested:", nrow(de_wt_vs_rev), "\n")
+cat("   Significant (FDR < 0.05):", sum(de_wt_vs_rev$p_val_adj < 0.05, na.rm = TRUE), "\n\n")
+
+## Comparison 2: REV vs RRAC (REV on left, RRAC on right)
+## ident.1 = RRAC (right), ident.2 = REV (left)
+## Positive log2FC = upregulated in RRAC
+## Negative log2FC = downregulated in RRAC (upregulated in REV)
+cat("2. Running DE: REV vs RRAC...\n")
+de_rev_vs_rrac <- FindMarkers(
+  female_filtered,
+  ident.1 = "RRAC",  # Right group
+  ident.2 = "REV",   # Left group
+  min.pct = 0.1,
+  logfc.threshold = 0.25,
+  test.use = "wilcox"
+)
+de_rev_vs_rrac$gene <- rownames(de_rev_vs_rrac)
+de_rev_vs_rrac <- de_rev_vs_rrac %>% arrange(p_val_adj)
+
+write.csv(de_rev_vs_rrac, file.path(output_dir, "DE_REV_vs_RRAC.csv"), row.names = FALSE)
+cat("   ✓ Saved: DE_REV_vs_RRAC.csv\n")
+cat("   Total genes tested:", nrow(de_rev_vs_rrac), "\n")
+cat("   Significant (FDR < 0.05):", sum(de_rev_vs_rrac$p_val_adj < 0.05, na.rm = TRUE), "\n\n")
+
+## Comparison 3: WT vs RRAC (WT on left, RRAC on right)
+## ident.1 = RRAC (right), ident.2 = WT (left)
+## Positive log2FC = upregulated in RRAC
+## Negative log2FC = downregulated in RRAC (upregulated in WT)
+cat("3. Running DE: WT vs RRAC...\n")
+de_wt_vs_rrac <- FindMarkers(
+  female_filtered,
+  ident.1 = "RRAC",  # Right group
+  ident.2 = "WT",    # Left group
+  min.pct = 0.1,
+  logfc.threshold = 0.25,
+  test.use = "wilcox"
+)
+de_wt_vs_rrac$gene <- rownames(de_wt_vs_rrac)
+de_wt_vs_rrac <- de_wt_vs_rrac %>% arrange(p_val_adj)
+
+write.csv(de_wt_vs_rrac, file.path(output_dir, "DE_WT_vs_RRAC.csv"), row.names = FALSE)
+cat("   ✓ Saved: DE_WT_vs_RRAC.csv\n")
+cat("   Total genes tested:", nrow(de_wt_vs_rrac), "\n")
+cat("   Significant (FDR < 0.05):", sum(de_wt_vs_rrac$p_val_adj < 0.05, na.rm = TRUE), "\n\n")
+
+############################################################
+## 8. CREATE VOLCANO PLOTS
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("CREATING VOLCANO PLOTS\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+# WT vs REV (WT on left, REV on right)
+cat("Creating volcano plot: WT vs REV...\n")
+p1 <- plot_volcano(
+  de_results = de_wt_vs_rev,
+  comparison_name = "WT vs REV",
+  right_group_name = "REVERSA",
+  left_group_name = "WT",
+  padj_cutoff = 0.05,
+  fc_cutoff = 0.5
+)
+ggsave(file.path(output_dir, "Volcano_WT_vs_REV.png"), p1, width = 10, height = 8, dpi = 300)
+cat("✓ Saved: Volcano_WT_vs_REV.png\n\n")
+
+# REV vs RRAC (REV on left, RRAC on right)
+cat("Creating volcano plot: REV vs RRAC...\n")
+p2 <- plot_volcano(
+  de_results = de_rev_vs_rrac,
+  comparison_name = "REV vs RRAC",
+  right_group_name = "RRAC226",
+  left_group_name = "REVERSA",
+  padj_cutoff = 0.05,
+  fc_cutoff = 0.5
+)
+ggsave(file.path(output_dir, "Volcano_REV_vs_RRAC.png"), p2, width = 10, height = 8, dpi = 300)
+cat("✓ Saved: Volcano_REV_vs_RRAC.png\n\n")
+
+# WT vs RRAC (WT on left, RRAC on right)
+cat("Creating volcano plot: WT vs RRAC...\n")
+p3 <- plot_volcano(
+  de_results = de_wt_vs_rrac,
+  comparison_name = "WT vs RRAC",
+  right_group_name = "RRAC226",
+  left_group_name = "WT",
+  padj_cutoff = 0.05,
+  fc_cutoff = 0.5
+)
+ggsave(file.path(output_dir, "Volcano_WT_vs_RRAC.png"), p3, width = 10, height = 8, dpi = 300)
+cat("✓ Saved: Volcano_WT_vs_RRAC.png\n\n")
+
+############################################################
+## 9. SUMMARY STATISTICS
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("SUMMARY OF DIFFERENTIAL EXPRESSION\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+summary_df <- data.frame(
+  Comparison = c("WT vs REV", "REV vs RRAC", "WT vs RRAC"),
+  Total_Genes = c(nrow(de_wt_vs_rev), nrow(de_rev_vs_rrac), nrow(de_wt_vs_rrac)),
+  Significant_FDR_0.05 = c(
+    sum(de_wt_vs_rev$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_rev_vs_rrac$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_wt_vs_rrac$p_val_adj < 0.05, na.rm = TRUE)
+  ),
+  Upregulated_RightGroup_FC_0.5 = c(
+    sum(de_wt_vs_rev$avg_log2FC > 0.5 & de_wt_vs_rev$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_rev_vs_rrac$avg_log2FC > 0.5 & de_rev_vs_rrac$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_wt_vs_rrac$avg_log2FC > 0.5 & de_wt_vs_rrac$p_val_adj < 0.05, na.rm = TRUE)
+  ),
+  Downregulated_RightGroup_FC_0.5 = c(
+    sum(de_wt_vs_rev$avg_log2FC < -0.5 & de_wt_vs_rev$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_rev_vs_rrac$avg_log2FC < -0.5 & de_rev_vs_rrac$p_val_adj < 0.05, na.rm = TRUE),
+    sum(de_wt_vs_rrac$avg_log2FC < -0.5 & de_wt_vs_rrac$p_val_adj < 0.05, na.rm = TRUE)
+  )
+)
+
+print(summary_df)
+write.csv(summary_df, file.path(output_dir, "DE_Summary.csv"), row.names = FALSE)
+cat("\n✓ Saved: DE_Summary.csv\n")
+
+cat("\nInterpretation:\n")
+cat("  WT vs REV:\n")
+cat("    - Upregulated_RightGroup = genes higher in REVERSA\n")
+cat("    - Downregulated_RightGroup = genes higher in WT\n")
+cat("  REV vs RRAC:\n")
+cat("    - Upregulated_RightGroup = genes higher in RRAC226\n")
+cat("    - Downregulated_RightGroup = genes higher in REVERSA\n")
+cat("  WT vs RRAC:\n")
+cat("    - Upregulated_RightGroup = genes higher in RRAC226\n")
+cat("    - Downregulated_RightGroup = genes higher in WT\n\n")
+
+############################################################
+## 10. TOP GENES FOR EACH COMPARISON
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("TOP 10 DIFFERENTIALLY EXPRESSED GENES\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+cat("WT vs REV (Top 10 by adjusted p-value):\n")
+cat("  Positive FC = higher in REVERSA, Negative FC = higher in WT\n")
+print(head(de_wt_vs_rev %>% select(gene, avg_log2FC, p_val_adj), 10))
+
+cat("\n\nREV vs RRAC (Top 10 by adjusted p-value):\n")
+cat("  Positive FC = higher in RRAC226, Negative FC = higher in REVERSA\n")
+print(head(de_rev_vs_rrac %>% select(gene, avg_log2FC, p_val_adj), 10))
+
+cat("\n\nWT vs RRAC (Top 10 by adjusted p-value):\n")
+cat("  Positive FC = higher in RRAC226, Negative FC = higher in WT\n")
+print(head(de_wt_vs_rrac %>% select(gene, avg_log2FC, p_val_adj), 10))
+
+############################################################
+## 11. VENN DIAGRAM ANALYSIS
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("VENN DIAGRAM ANALYSIS\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+# Define significance thresholds
+padj_thresh <- 0.05
+fc_thresh <- 0.5
+
+# Extract gene signatures for "HEALTHY" overlap
+# 1. WT "healthy" signature: Higher in WT compared to Rev (Down in Rev vs WT)
+#    = negative log2FC in de_wt_vs_rev
+wt_healthy_sig <- de_wt_vs_rev %>%
+  filter(avg_log2FC < -fc_thresh & p_val_adj < padj_thresh) %>%
+  pull(gene)
+
+cat("WT 'healthy' signature (higher in WT vs REV):", length(wt_healthy_sig), "genes\n")
+
+# 2. Unique Regression signature (purple): Up in RRAC vs WT
+#    = positive log2FC in de_wt_vs_rrac
+unique_regression_wt <- de_wt_vs_rrac %>%
+  filter(avg_log2FC > fc_thresh & p_val_adj < padj_thresh) %>%
+  pull(gene)
+
+cat("Unique Regression signature (RRAC vs WT):", length(unique_regression_wt), "genes\n")
+
+# 3. Unique Regression signature (red): Up in RRAC vs Rev
+#    = positive log2FC in de_rev_vs_rrac
+unique_regression_rev <- de_rev_vs_rrac %>%
+  filter(avg_log2FC > fc_thresh & p_val_adj < padj_thresh) %>%
+  pull(gene)
+
+cat("Unique Regression signature (RRAC vs REV):", length(unique_regression_rev), "genes\n\n")
+
+# Extract gene signatures for "DISEASE" overlap
+# 4. "High Cholesterol" signature: Up in Rev vs WT
+#    = positive log2FC in de_wt_vs_rev
+high_chol_sig <- de_wt_vs_rev %>%
+  filter(avg_log2FC > fc_thresh & p_val_adj < padj_thresh) %>%
+  pull(gene)
+
+cat("'High Cholesterol' signature (higher in REV vs WT):", length(high_chol_sig), "genes\n")
+
+# 5. "Inflammation" signature: Down in RRAC vs Rev
+#    = negative log2FC in de_rev_vs_rrac
+inflammation_sig <- de_rev_vs_rrac %>%
+  filter(avg_log2FC < -fc_thresh & p_val_adj < padj_thresh) %>%
+  pull(gene)
+
+cat("'Inflammation' signature (lower in RRAC vs REV):", length(inflammation_sig), "genes\n\n")
+
+############################################################
+## Create Venn diagrams
+############################################################
+
+# Venn diagram 1: "Healthy" signature overlap
+cat("Creating Venn diagram 1: Healthy signature overlap...\n")
+healthy_list <- list(
+  "WT Healthy (↓REV vs WT)" = wt_healthy_sig,
+  "Regression (↑RRAC vs WT)" = unique_regression_wt,
+  "Regression (↑RRAC vs REV)" = unique_regression_rev
+)
+
+venn1 <- ggVennDiagram(healthy_list, label_alpha = 0, label = "count") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+   scale_x_continuous(expand = expansion(mult = 0.2)) +
+  labs(title = "Healthy Signature Overlap",
+       subtitle = "Genes upregulated to induce regression") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 12),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "VennDiagram_Healthy_Overlap.png"), venn1, 
+       width = 16, height = 10, dpi = 300)
+cat("✓ Saved: VennDiagram_Healthy_Overlap.png\n")
+
+
+############################################################
+## 16. SAVE HEALTHY VENN GENE LISTS TO CSV
+############################################################
+
+cat("\nSaving Healthy Venn gene lists...\n")
+
+# Aliases for readability
+A <- wt_healthy_sig            # WT Healthy (↓REV vs WT)
+B <- unique_regression_wt      # Regression (↑RRAC vs WT)
+C <- unique_regression_rev     # Regression (↑RRAC vs REV)
+
+# Compute regions
+A_only <- setdiff(A, union(B, C))
+B_only <- setdiff(B, union(A, C))
+C_only <- setdiff(C, union(A, B))
+
+A_B <- setdiff(intersect(A, B), C)
+A_C <- setdiff(intersect(A, C), B)
+B_C <- setdiff(intersect(B, C), A)
+
+A_B_C <- Reduce(intersect, list(A, B, C))
+
+# Sanity check counts (should match the Venn plot)
+cat("WT Healthy only:", length(A_only), "\n")
+cat("Regression (RRAC vs WT) only:", length(B_only), "\n")
+cat("Regression (RRAC vs REV) only:", length(C_only), "\n")
+cat("WT ∩ RRAC vs WT:", length(A_B), "\n")
+cat("WT ∩ RRAC vs REV:", length(A_C), "\n")
+cat("RRAC vs WT ∩ RRAC vs REV:", length(B_C), "\n")
+cat("All three overlap:", length(A_B_C), "\n\n")
+
+# Save each region
+write.csv(data.frame(gene = A_only),
+          file.path(output_dir, "Healthy_WT_only_39genes.csv"),
+          row.names = FALSE)
+
+write.csv(data.frame(gene = B_only),
+          file.path(output_dir, "Healthy_RRAC_vs_WT_only_41genes.csv"),
+          row.names = FALSE)
+
+write.csv(data.frame(gene = C_only),
+          file.path(output_dir, "Healthy_RRAC_vs_REV_only_33genes.csv"),
+          row.names = FALSE)
+
+write.csv(data.frame(gene = A_C),
+          file.path(output_dir, "Healthy_WT_and_RRAC_vs_WT_7genes.csv"),
+          row.names = FALSE)
+
+write.csv(data.frame(gene = B_C),
+          file.path(output_dir, "Healthy_RRAC_vs_WT_and_RRAC_vs_REV_10genes.csv"),
+          row.names = FALSE)
+
+write.csv(data.frame(gene = A_B_C),
+          file.path(output_dir, "Healthy_All_Three_Overlap_0genes.csv"),
+          row.names = FALSE)
+
+cat("✓ Saved healthy gene lists:\n")
+cat("  - Healthy_WT_only_39genes.csv\n")
+cat("  - Healthy_RRAC_vs_WT_only_41genes.csv\n")
+cat("  - Healthy_RRAC_vs_REV_only_33genes.csv\n")
+cat("  - Healthy_WT_and_RRAC_vs_WT_7genes.csv\n")
+cat("  - Healthy_RRAC_vs_WT_and_RRAC_vs_REV_10genes.csv\n")
+cat("  - Healthy_All_Three_Overlap_0genes.csv\n")
+
+
+# Venn diagram 2: "Disease" signature overlap
+cat("Creating Venn diagram 2: Disease signature overlap...\n")
+disease_list <- list(
+  "Inflammation\n(↓RRAC vs REV)" = inflammation_sig,
+  "High Cholesterol\n(↑REV vs WT)" = high_chol_sig
+)
+
+venn2 <- ggVennDiagram(disease_list, label_alpha = 0, label = "count" ) +
+  scale_fill_gradient(low = "white", high = "coral") +
+   scale_x_continuous(expand = expansion(mult = 0.2)) +
+  labs(title = "Disease Signature Overlap",
+       subtitle = "Targets that could be knocked down to induce regression") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 12),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "VennDiagram_Disease_Overlap.png"), venn2, 
+       width = 16, height = 10, dpi = 300)
+cat("✓ Saved: VennDiagram_Disease_Overlap.png\n")
+
+############################################################
+## 15. SAVE DISEASE VENN GENE LISTS TO CSV
+############################################################
+
+cat("\nSaving Disease Venn gene lists...\n")
+
+# Compute Venn regions
+disease_overlap_genes <- intersect(high_chol_sig, inflammation_sig)
+
+high_chol_only_genes <- setdiff(high_chol_sig, inflammation_sig)
+
+inflammation_only_genes <- setdiff(inflammation_sig, high_chol_sig)
+
+# Sanity check counts (should match Venn plot)
+cat("High Cholesterol only:", length(high_chol_only_genes), "\n")
+cat("Inflammation only:", length(inflammation_only_genes), "\n")
+cat("Overlap (Both):", length(disease_overlap_genes), "\n\n")
+
+# Save to CSV
+write.csv(
+  data.frame(gene = high_chol_only_genes),
+  file.path(output_dir, "Disease_HighCholesterol_only_65genes.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(gene = disease_overlap_genes),
+  file.path(output_dir, "Disease_Overlap_Both_13genes.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(gene = inflammation_only_genes),
+  file.path(output_dir, "Disease_Inflammation_only_33genes.csv"),
+  row.names = FALSE
+)
+
+cat("✓ Saved disease gene lists:\n")
+cat("  - Disease_HighCholesterol_only_65genes.csv\n")
+cat("  - Disease_Overlap_Both_13genes.csv\n")
+cat("  - Disease_Inflammation_only_33genes.csv\n")
+
+############################################################
+## 15. SAVE DISEASE VENN GENE LISTS TO CSV
+############################################################
+
+cat("\nSaving Disease Venn gene lists...\n")
+
+# Compute Venn regions
+disease_overlap_genes <- intersect(high_chol_sig, inflammation_sig)
+
+high_chol_only_genes <- setdiff(high_chol_sig, inflammation_sig)
+
+inflammation_only_genes <- setdiff(inflammation_sig, high_chol_sig)
+
+# Sanity check counts (should match Venn plot)
+cat("High Cholesterol only:", length(high_chol_only_genes), "\n")
+cat("Inflammation only:", length(inflammation_only_genes), "\n")
+cat("Overlap (Both):", length(disease_overlap_genes), "\n\n")
+
+# Save to CSV
+write.csv(
+  data.frame(gene = high_chol_only_genes),
+  file.path(output_dir, "Disease_HighCholesterol_only_65genes.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(gene = disease_overlap_genes),
+  file.path(output_dir, "Disease_Overlap_Both_13genes.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(gene = inflammation_only_genes),
+  file.path(output_dir, "Disease_Inflammation_only_33genes.csv"),
+  row.names = FALSE
+)
+
+cat("✓ Saved disease gene lists:\n")
+cat("  - Disease_HighCholesterol_only_65genes.csv\n")
+cat("  - Disease_Overlap_Both_13genes.csv\n")
+cat("  - Disease_Inflammation_only_33genes.csv\n")
+
+
+############################################################
+## 12. SAVE FILTERED SEURAT OBJECT
+############################################################
+
+cat("\n\nSaving filtered Seurat object...\n")
+saveRDS(female_filtered, file.path(output_dir, "Female_ITS2_Filtered_Seurat.rds"))
+cat("✓ Saved: Female_ITS2_Filtered_Seurat.rds\n")
+
+############################################################
+## 13. FINAL SUMMARY
+############################################################
+
+cat("\n" , rep("=", 60), "\n", sep = "")
+cat("FINAL ANALYSIS SUMMARY\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+cat("Cells analyzed:\n")
+cat("  Total after filtering:", ncol(female_filtered), "\n")
+cat("  WT group:", sum(female_filtered$treatment_group == "WT"), "cells\n")
+cat("  REV group:", sum(female_filtered$treatment_group == "REV"), "cells\n")
+cat("  RRAC group:", sum(female_filtered$treatment_group == "RRAC"), "cells\n\n")
+
+cat("Slices analyzed:\n")
+cat("  WT slices:", paste(slice_to_treatment_de$slice_id[slice_to_treatment_de$treatment_group == "WT"], collapse = ", "), "\n")
+cat("  REV slices:", paste(slice_to_treatment_de$slice_id[slice_to_treatment_de$treatment_group == "REV"], collapse = ", "), "\n")
+cat("  RRAC slices:", paste(slice_to_treatment_de$slice_id[slice_to_treatment_de$treatment_group == "RRAC"], collapse = ", "), "\n\n")
+
+cat("Excluded slices:\n")
+cat("  Slice 318 (unknown) - excluded as requested\n\n")
+
+cat("Files generated:\n")
+cat("  - 3 Differential Expression CSV files\n")
+cat("  - 3 Volcano plots\n")
+cat("  - 2 Venn diagrams (standard versions)\n")
+cat("  - 2 Venn diagrams with gene names\n")
+cat("  - DE summary CSV\n")
+cat("  - Filtered metadata CSV\n")
+cat("  - Filtered Seurat object RDS\n\n")
+
+############################################################
+## 14. SESSION INFO
+############################################################
+
+cat(rep("=", 60), "\n", sep = "")
+cat("SESSION INFO\n")
+cat(rep("=", 60), "\n\n", sep = "")
+sessionInfo()
+
+cat("\nDIFFERENTIAL EXPRESSION ANALYSIS COMPLETE!\n")
+cat("All results saved to:", output_dir, "\n")
+cat(rep("=", 60), "\n", sep = "")
+```

@@ -1,12 +1,12 @@
 ---
-title: "MALE_PCA_ANALYSIS_ALL_GENES"
+title: "FEMALE_MALE_COMBINED_PCA_ANLAYSIS_EXCLUDED_GENES"
 output: html_document
 date: "2026-01-09"
 ---
 ```{r setup, include=FALSE}
 ############################################################
-## MALE ONLY: QC + CELL-LEVEL UMAP + SLICE PCA
-## NO GENE EXCLUSION - ALL GENES INCLUDED
+## COMBINED MALE + FEMALE: QC + CELL-LEVEL UMAP + SLICE PCA
+## WITH GENE EXCLUSION - CARDIAC, RBC, MT GENES REMOVED
 ############################################################
 
 suppressPackageStartupMessages({
@@ -18,15 +18,27 @@ suppressPackageStartupMessages({
   library(htmlwidgets)
   library(pheatmap)
   library(ggrepel)
+  library(ggnewscale)
 })
 
 ############################################################
 ## 0. PATHS (EDIT IF NEEDED)
 ############################################################
 
-root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/NEW_PCA_ANALYSIS/MALE_PCA_WITH_ALL_GENES_RESULTS"
+root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/NEW_PCA_ANALYSIS_JAN23/FEMALE_MALE_COMBINED_PCA_FILTERED_GENES_RESULTS"
 
-male_its2_path <- "/Users/preddy/Desktop/Lab_Streeter_new/Male/ITS2.csv"
+FILE_PREFIX<- "MALE_FEMALE_COMBINED_FILTERED_GENES_"
+
+
+male_its2_path   <- "~/Desktop/Lab_Streeter_new/DATA/MALE/ITS2.csv"
+female_its2_path <- "~/Desktop/Lab_Streeter_new/DATA/FEMALE/ITS2.csv"
+
+female_paths <- list(
+  WT1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control1_filtered_feature_bc_matrix.h5",
+  WT2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control2_filtered_feature_bc_matrix.h5",
+  TG1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group1_filtered_feature_bc_matrix.h5",
+  TG2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group2_filtered_feature_bc_matrix.h5"
+)
 
 male_paths <- list(
   CONTROL = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/Control_filtered_feature_bc_matrix.h5",
@@ -70,8 +82,8 @@ clean_barcode <- function(bc) {
 }
 
 clean_slice_id <- function(x) {
-  x <- trimws(x)
-  x <- sub("\\s+ITS$", "", x)
+  x <- trimws(x)                 # remove leading/trailing spaces
+  x <- sub("\\s+ITS$", "", x)    # remove trailing " ITS" if present
   x
 }
 
@@ -79,6 +91,27 @@ compute_genes_expressed <- function(seu) {
   counts_mat <- GetAssayData(seu, assay = "RNA", slot = "counts")
   seu$genes_expressed <- Matrix::colSums(counts_mat > 0)
   seu
+}
+
+get_genes_to_exclude <- function(all_genes) {
+  ## Explicit gene list
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+  
+  ## Find genes matching exclusion criteria
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes) 
+  ]
+  
+  return(unique(exclude_genes))
 }
 
 make_pseudobulk_by_slice <- function(seu, genes = NULL) {
@@ -208,8 +241,31 @@ plot_genes_expressed_heatmap_static_and_interactive <- function(seu, out_png, ou
 ```
 ```{r load_data, include=FALSE}
 ############################################################
-## 3. LOAD DATA + MERGE
+## 3. LOAD DATA + MERGE + FILTER GENES
 ############################################################
+
+cat("Loading FEMALE...\n")
+
+female_objs <- lapply(names(female_paths), function(nm) {
+  x <- Read10X_h5(female_paths[[nm]])
+  obj <- CreateSeuratObject(x, project = nm)
+
+  obj$sample <- nm
+  obj$sex <- "Female"
+
+  obj$barcode_clean <- clean_barcode(colnames(obj))
+  obj$barcode_id <- paste(obj$sex, obj$sample, obj$barcode_clean, sep = "_")
+
+  stopifnot(!any(duplicated(obj$barcode_id)))
+  obj
+})
+
+female <- merge(
+  female_objs[[1]],
+  y = female_objs[-1],
+  add.cell.ids = names(female_paths),
+  project = "Female"
+)
 
 cat("Loading MALE...\n")
 
@@ -234,24 +290,78 @@ male <- merge(
   project = "Male"
 )
 
+cat("Merging FEMALE + MALE...\n")
+
+seurat_all <- merge(
+  x = female,
+  y = male,
+  add.cell.ids = c("Female", "Male"),
+  project = "Combined"
+)
+
 ## Seurat v5 layer join
-male[["RNA"]] <- JoinLayers(male[["RNA"]])
+seurat_all[["RNA"]] <- JoinLayers(seurat_all[["RNA"]])
+
+############################################################
+## FILTER GENES - REMOVE CARDIAC, RBC, MT GENES
+############################################################
+
+cat("\n=== FILTERING GENES ===\n")
+genes_before <- nrow(seurat_all)
+cat("Total genes before filtering:", genes_before, "\n")
+
+all_genes <- rownames(seurat_all)
+genes_to_exclude <- get_genes_to_exclude(all_genes)
+
+cat("Genes to exclude (n =", length(genes_to_exclude), "):\n")
+print(genes_to_exclude)
+
+genes_to_keep <- setdiff(all_genes, genes_to_exclude)
+cat("\nGenes to keep:", length(genes_to_keep), "\n")
+
+## Physically remove genes from Seurat object
+seurat_all <- subset(seurat_all, features = genes_to_keep)
+
+genes_after <- nrow(seurat_all)
+cat("Total genes after filtering:", genes_after, "\n")
+cat("Genes removed:", genes_before - genes_after, "\n")
+cat("=== GENE FILTERING COMPLETE ===\n\n")
+
+## Write FEMALE metadata CSV
+female_meta_df <- female[[]] %>%
+  mutate(cell_barcode = rownames(.)) %>%
+  select(cell_barcode, everything())
+
+female_csv <- file.path(root_dir, "Female_Metadata_filtered_genes.csv")
+write.csv(female_meta_df, female_csv, row.names = FALSE)
+
+cat("Female metadata saved at:\n", female_csv, "\n")
 
 ## Write MALE metadata CSV
 male_meta_df <- male[[]] %>%
   mutate(cell_barcode = rownames(.)) %>%
   select(cell_barcode, everything())
 
-male_csv <- file.path(root_dir, "Male_Metadata_all_genes.csv")
+male_csv <- file.path(root_dir, "Male_Metadata_filtered_genes.csv")
 write.csv(male_meta_df, male_csv, row.names = FALSE)
 
 cat("Male metadata saved at:\n", male_csv, "\n")
 
+## Write COMBINED metadata CSV
+combined_meta_df <- seurat_all[[]] %>%
+  mutate(cell_barcode = rownames(.)) %>%
+  select(cell_barcode, everything())
+
+combined_csv <- file.path(root_dir, "Combined_Male_Female_filtered_genes.csv")
+write.csv(combined_meta_df, combined_csv, row.names = FALSE)
+
+cat("Combined metadata saved at:\n", combined_csv, "\n")
+
 # Check samples
-table(male$sample)
+table(seurat_all$sample)
 
 # Check metadata columns
-colnames(male@meta.data)
+colnames(seurat_all@meta.data)
 ```
 ```{r qc_metrics, include=FALSE}
 ############################################################
@@ -259,24 +369,37 @@ colnames(male@meta.data)
 ############################################################
 
 cat("Computing QC metrics...\n")
-male[["percent.mt"]] <- PercentageFeatureSet(male, pattern = "^mt-")
-if (all(male$percent.mt == 0)) {
-  male[["percent.mt"]] <- PercentageFeatureSet(male, pattern = "^MT-")
+seurat_all[["percent.mt"]] <- PercentageFeatureSet(seurat_all, pattern = "^mt-")
+if (all(seurat_all$percent.mt == 0)) {
+  seurat_all[["percent.mt"]] <- PercentageFeatureSet(seurat_all, pattern = "^MT-")
 }
 
-male <- compute_genes_expressed(male)
+seurat_all <- compute_genes_expressed(seurat_all)
 
 ## Violin plots by sample
 p_violin_sample <- VlnPlot(
-  male,
+  seurat_all,
   features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
   group.by = "sample",
   pt.size = 0.1,
   ncol = 3
 )
 
-save_plot(p_violin_sample, "QC_Violin_BySample.png", 12, 5, subdir = dir_map$QC)
+save_plot(p_violin_sample, paste0(FILE_PREFIX,"QC_Violin_BySample.png"),
+, 12, 5, subdir = dir_map$QC)
 cat("✓ Saved: QC_Violin_BySample.png\n")
+
+## Violin plots by sex
+p_violin_sex <- VlnPlot(
+  seurat_all,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  group.by = "sex",
+  pt.size = 0.1,
+  ncol = 3
+)
+
+save_plot(p_violin_sex,paste0(FILE_PREFIX,"QC_Violin_BySex.png"), 12, 5, subdir = dir_map$QC)
+cat("✓ Saved: QC_Violin_BySex.png\n")
 ```
 ```{r normalize_variable_features, include=FALSE}
 ############################################################
@@ -284,20 +407,20 @@ cat("✓ Saved: QC_Violin_BySample.png\n")
 ############################################################
 
 cat("Normalizing and finding variable features...\n")
-male <- NormalizeData(male)
-male <- FindVariableFeatures(male, nfeatures = 2000)
+seurat_all <- NormalizeData(seurat_all)
+seurat_all <- FindVariableFeatures(seurat_all, nfeatures = 2000)
 
 ## Plot variable features
-top10 <- head(VariableFeatures(male), 10)
-p_var <- VariableFeaturePlot(male)
+top10 <- head(VariableFeatures(seurat_all), 10)
+p_var <- VariableFeaturePlot(seurat_all)
 p_var <- LabelPoints(plot = p_var, points = top10, repel = TRUE)
 p_var <- p_var + 
   labs(
-    title = "Highly Variable Genes (All Genes Included)",
-    subtitle = paste0("n = ", length(VariableFeatures(male)), " genes")
+    title = "Highly Variable Genes (Cardiac/RBC/MT Genes Excluded)",
+    subtitle = paste0("n = ", length(VariableFeatures(seurat_all)), " genes")
   )
 
-save_plot(p_var, "VariableFeatures.png", 8, 6, subdir = dir_map$QC)
+save_plot(p_var,paste0(FILE_PREFIX,"VariableFeatures.png"), 8, 6, subdir = dir_map$QC)
 cat("✓ Saved: VariableFeatures.png\n")
 p_var
 ```
@@ -307,75 +430,135 @@ p_var
 ############################################################
 
 cat("Scaling data and running cell-level PCA...\n")
-male <- ScaleData(male)
-male <- RunPCA(male, npcs = 30)
+seurat_all <- ScaleData(seurat_all)
+seurat_all <- RunPCA(seurat_all, npcs = 30)
 
-p_elbow <- ElbowPlot(male, ndims = 30) +
+p_elbow <- ElbowPlot(seurat_all, ndims = 30) +
   labs(title = "Elbow Plot (Cell-level PCA)")
 
-save_plot(p_elbow, "ElbowPlot_CellLevel.png", 7, 5, subdir = dir_map$Cell_Level)
+save_plot(p_elbow,paste0(FILE_PREFIX,"ElbowPlot_CellLevel.png"), 7, 5, subdir = dir_map$Cell_Level)
 cat("✓ Saved: ElbowPlot_CellLevel.png\n")
 p_elbow
 
 cat("Running UMAP...\n")
-male <- RunUMAP(male, dims = 1:20)
+seurat_all <- RunUMAP(seurat_all, dims = 1:20)
 
 ## UMAP colored by sample
 sample_colors <- c(
-  CONTROL  = "#1f77b4",  # blue
-  REVERSA  = "#2ca02c",  # green
-  REVREV   = "#d62728",  # red
-  RRAC226  = "#ff7f0e"   # orange
+  WT1      = "#d73027",  # red
+  WT2      = "#f46d43",  # lighter red
+  CONTROL  = "#a50026",  # dark red (male control)
+  TG1      = "#1a9850",  # green
+  REVERSA  = "#66bd63",  # black
+  TG2      = "#000000",  # light green
+  RRAC226  = "#969696",  # yellow/orange
+  REVREV   = "#0000FF"   # grey (related to black)
 )
 
 p_umap_sample <- DimPlot(
-  male,
+  seurat_all,
   group.by = "sample"
 ) +
   scale_color_manual(values = sample_colors) +
   theme_minimal(base_size = 14) +
   labs(
-    title = "UMAP by Sample (Male)",
+    title = "UMAP by Sample",
     color = "Sample"
   )
-save_plot(p_umap_sample, "UMAP_BySample.png", 9, 6, subdir = dir_map$UMAP)
+save_plot(p_umap_sample,paste0(FILE_PREFIX,"UMAP_BySample.png"), 9, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_BySample.png\n")
 
 p_umap_sample
+
+## UMAP colored by sex
+p_umap_sex <- DimPlot(seurat_all, group.by = "sex") +
+  theme_minimal(base_size = 14) +
+  labs(title = "UMAP by Sex")
+
+save_plot(p_umap_sex,paste0(FILE_PREFIX,"UMAP_BySex.png"), 9, 6, subdir = dir_map$UMAP)
+cat("✓ Saved: UMAP_BySex.png\n")
+
+p_umap_sex
 ```
 ```{r feature_plots, include=FALSE}
 ############################################################
 ## 7. FEATURE PLOTS (GENES EXPRESSED, MT%, nFeature)
 ############################################################
 
-p_genes <- FeaturePlot(male, features = "genes_expressed", reduction = "umap") +
+p_genes <- FeaturePlot(seurat_all, features = "genes_expressed", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "Genes expressed per spot (UMAP)")
 
-save_plot(p_genes, "UMAP_GenesExpressed.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_genes,paste0(FILE_PREFIX,"UMAP_GenesExpressed.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_GenesExpressed.png\n")
 p_genes
 
-p_mt <- FeaturePlot(male, features = "percent.mt", reduction = "umap") +
+p_mt <- FeaturePlot(seurat_all, features = "percent.mt", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "percent.mt (UMAP)")
 
-save_plot(p_mt, "UMAP_percentMT.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_mt,paste0(FILE_PREFIX,"UMAP_percentMT.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_percentMT.png\n")
 p_mt
 
-p_nFeature <- FeaturePlot(male, features = "nFeature_RNA", reduction = "umap") +
+p_nFeature <- FeaturePlot(seurat_all, features = "nFeature_RNA", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "nFeature_RNA (UMAP)")
 
-save_plot(p_nFeature, "UMAP_nFeatureRNA.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_nFeature,paste0(FILE_PREFIX,"UMAP_nFeatureRNA.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_nFeatureRNA.png\n")
 p_nFeature
 ```
 ```{r its2_mapping, include=FALSE}
 ############################################################
-## 8. ITS2 MAPPING + SLICE COUNTS
+## 8. ITS2 MAPPING (MALE + FEMALE) + SLICE COUNTS
 ############################################################
+
+cat("Loading Female ITS2 mapping...\n")
+
+female_its <- read.csv(female_its2_path, stringsAsFactors = FALSE)
+female_its$slice_id <- clean_slice_id(female_its$ITS2)
+
+# ⚠️ VERIFY THIS MAPPING IS CORRECT FOR YOUR EXPERIMENT!
+female_slice_treatment <- data.frame(
+  slice_id = c(
+    "315A", "315B", "312A",           # 3 slices for WT1
+    "317", "312B",                     # 2 slices for WT2
+    "44-3A", "44-3B", "42A", "42B",   # 4 slices for TG1
+    "46-2A", "46-2B", "44-2"          # 3 slices for TG2
+  ),
+  sample_label = c(
+    rep("WT1", 3),
+    rep("WT2", 2),
+    rep("TG1", 4),
+    rep("TG2", 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+female_slice_treatment$slice_id_clean <- clean_slice_id(female_slice_treatment$slice_id)
+
+female_its$sample_label <- female_slice_treatment$sample_label[
+  match(female_its$slice_id, female_slice_treatment$slice_id_clean)
+]
+
+# Drop unmapped
+female_its <- female_its %>% filter(!is.na(sample_label))
+
+female_its$barcode_clean <- clean_barcode(female_its$Barcode)
+
+female_its$barcode_id <- paste(
+  "Female",
+  female_its$sample_label,
+  female_its$barcode_clean,
+  sep = "_"
+)
+
+write.csv(
+  female_its,
+  file.path(dir_map$SliceMapping, "Female_ITS2_with_barcode_id.csv"),
+  row.names = FALSE
+)
 
 cat("Loading Male ITS2 mapping...\n")
 
@@ -383,15 +566,15 @@ male_its <- read.csv(male_its2_path, stringsAsFactors = FALSE)
 male_its$slice_id <- clean_slice_id(male_its$ITS2)
 
 male_slice_treatment <- data.frame(
-  slice_id = c(
-    "314A ITS", "321A", "321B",
-    "45-3A", "45-4A", "45-4B", "54-3B",
+   slice_id = c(
+    "314A", "321A", "321B",
+    "45-4A", "45-4B",
     "49-1A", "49-1B",
     "45-1A", "45-1B", "45-1C", "45-1D", "45-2A", "45-2B", "45-2C"
   ),
   sample_label = c(
     rep("CONTROL", 3),
-    rep("REVERSA", 4),
+    rep("REVERSA", 2),
     rep("REVREV", 2),
     rep("RRAC226", 7)
   ),
@@ -421,23 +604,34 @@ write.csv(
   row.names = FALSE
 )
 
-# Build slice → treatment mapping for PCA
-male_slice_treatment$slice_id <- clean_slice_id(male_slice_treatment$slice_id)
+# Combine male and female ITS mappings
+its_all <- bind_rows(male_its, female_its)
 
-slice_treatment <- male_slice_treatment %>%
+# Save combined ITS mapping
+write.csv(
+  its_all,
+  file.path(dir_map$SliceMapping, "ITS2_Combined_with_barcode_id.csv"),
+  row.names = FALSE
+)
+
+# Build slice → treatment mapping for PCA
+male_slice_treatment$slice_id   <- clean_slice_id(male_slice_treatment$slice_id)
+female_slice_treatment$slice_id <- clean_slice_id(female_slice_treatment$slice_id)
+
+slice_treatment <- bind_rows(male_slice_treatment, female_slice_treatment) %>%
   rename(treatment = sample_label) %>%
   distinct(slice_id, treatment)
 
-# Attach slice_id to Seurat
-male$slice_id <- male_its$slice_id[
-  match(male$barcode_id, male_its$barcode_id)
+# Attach slice_id to Seurat (use CLEAN slice_id, not ITS2)
+seurat_all$slice_id <- its_all$slice_id[
+  match(seurat_all$barcode_id, its_all$barcode_id)
 ]
 
 # Save seurat metadata with slice_id
-meta <- male@meta.data
+meta <- seurat_all@meta.data
 write.csv(
   meta,
-  file.path(dir_map$SliceMapping, "male_metadata_with_slice_id.csv"),
+  file.path(dir_map$SliceMapping, "seurat_all_metadata_with_slice_id.csv"),
   row.names = TRUE
 )
 
@@ -464,8 +658,8 @@ print(slice_barcode_counts)
 cat("\nCreating pseudobulk profiles and running slice-level PCA...\n")
 
 ## Use variable features for PCA
-var_genes <- VariableFeatures(male)
-pb <- make_pseudobulk_by_slice(male, genes = var_genes)
+var_genes <- VariableFeatures(seurat_all)
+pb <- make_pseudobulk_by_slice(seurat_all, genes = var_genes)
 pseudobulk <- pb$pseudobulk
 
 cat("Pseudobulk matrix dimensions:", nrow(pseudobulk), "genes x", ncol(pseudobulk), "slices\n")
@@ -487,7 +681,7 @@ pca_df <- data.frame(
 
 pca_df <- left_join(pca_df, slice_treatment, by = "slice_id")
 
-write.csv(pca_df, file.path(dir_map$Slice_PCA, "SlicePCA_Coordinates_PC1_PC2_PC3.csv"), row.names = FALSE)
+write.csv(pca_df, file.path(dir_map$Slice_PCA, paste0(FILE_PREFIX,"SlicePCA_Coordinates_PC1_PC2_PC3.csv")), row.names = FALSE)
 ```
 ```{r slice_pca_plots, include=FALSE}
 ############################################################
@@ -495,10 +689,14 @@ write.csv(pca_df, file.path(dir_map$Slice_PCA, "SlicePCA_Coordinates_PC1_PC2_PC3
 ############################################################
 
 treat_colors <- c(
-  CONTROL  = "#1f77b4",  # blue
-  REVERSA  = "#2ca02c",  # green
-  REVREV   = "#d62728",  # red
-  RRAC226  = "#ff7f0e"   # orange
+  WT1      = "#1f77b4",  # blue
+  WT2      = "#1f77b4",
+  CONTROL  = "#1f77b4",
+  TG1      = "#2ca02c",  # green
+  REVERSA  = "#2ca02c",
+  TG2      = "#ff7f0e",  # orange
+  RRAC226  = "#ff7f0e",
+  REVREV   = "#d62728"   # red (standalone)
 )
 
 p_pc1_pc2 <- ggplot(
@@ -518,13 +716,13 @@ p_pc1_pc2 <- ggplot(
   ) +
   theme_minimal(base_size = 16) +
   labs(
-    title = "Slice-level PCA (Male Only)",
+    title = "Slice-level PCA (Combined Male + Female)",
     x = paste0("PC1 (", round(pca_var[1], 1), "%)"),
     y = paste0("PC2 (", round(pca_var[2], 1), "%)")
   ) +
   scale_color_manual(values = treat_colors, name = "Treatment Group")
 
-save_plot(p_pc1_pc2, "SlicePCA_PC1_vs_PC2_ByTreatment.png", 8, 6, subdir = dir_map$Slice_PCA)
+save_plot(p_pc1_pc2,paste0(FILE_PREFIX,"SlicePCA_PC1_vs_PC2_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
 cat("✓ Saved: SlicePCA_PC1_vs_PC2_ByTreatment.png\n")
 p_pc1_pc2
 
@@ -547,14 +745,14 @@ p_pc2_pc3 <- ggplot(pca_df, aes(PC2, PC3, color = treatment, label = slice_id, g
   ) +
   theme_minimal(base_size = 16) +
   labs(
-    title = "Slice-level PCA (Male Only)",
+    title = "Slice-level PCA (Combined Male + Female)",
     subtitle = paste0("PC2 vs PC3, n = ", nrow(pca_df), " slices"),
     x = paste0("PC2 (", round(pca_var[2], 1), "%)"),
     y = paste0("PC3 (", round(pca_var[3], 1), "%)")
   ) +
   scale_color_manual(values = treat_colors, name = "Treatment Group")
 
-save_plot(p_pc2_pc3, "SlicePCA_PC2_vs_PC3_ByTreatment.png", 8, 6, subdir = dir_map$Slice_PCA)
+save_plot(p_pc2_pc3,paste0(FILE_PREFIX,"SlicePCA_PC2_vs_PC3_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
 cat("✓ Saved: SlicePCA_PC2_vs_PC3_ByTreatment.png\n")
 p_pc2_pc3
 ```
@@ -566,7 +764,7 @@ p_pc2_pc3
 cat("Saving PC loadings...\n")
 loadings_tbl <- save_pc_loadings(
   pca_result,
-  out_csv = file.path(dir_map$Loadings, "Top_PC_Loadings_PC1_PC2_PC3.csv"),
+  out_csv = file.path(dir_map$Loadings, paste0(FILE_PREFIX,"Top_PC_Loadings_PC1_PC2_PC3.csv")),
   top_n = 30
 )
 
@@ -583,7 +781,7 @@ for (pc in c("PC1", "PC2", "PC3")) {
 
 cat("\nGenerating genes_expressed heatmaps...\n")
 plot_genes_expressed_heatmap_static_and_interactive(
-  male,
+  seurat_all,
   out_png  = file.path(dir_map$Heatmaps_GenesExpressed, "Heatmap_GenesExpressed_AllSlices_Static.png"),
   out_html = file.path(dir_map$Heatmaps_GenesExpressed, "Heatmap_GenesExpressed_AllSlices_Interactive.html")
 )
@@ -601,11 +799,11 @@ rownames(annotation_col) <- pca_df$slice_id
 
 ann_colors <- list(treatment = treat_colors)
 
-## Slice order by treatment
+## Slice order by treatment - FIXED to match actual treatment values
 slice_order_treatment <- pca_df %>%
   filter(!is.na(treatment)) %>%
   arrange(
-    factor(treatment, levels = c("CONTROL", "REVERSA", "REVREV", "RRAC226")), 
+    factor(treatment, levels = c("WT1", "WT2", "CONTROL", "TG1", "REVERSA", "TG2", "RRAC226", "REVREV")), 
     PC1
   ) %>%
   pull(slice_id)
@@ -626,7 +824,7 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Default clustering)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_Default.png")),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Default.png")),
     width = 9, height = 10
   )
 
@@ -640,7 +838,7 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Ordered by Treatment)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_ByTreatment.png")),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_ByTreatment.png")),
     width = 9, height = 10
   )
 
@@ -657,12 +855,121 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Ordered by PC score)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_ByLikeness.png")),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Score.png")),
     width = 9, height = 10
   )
 }
 
 cat("✓ Saved: All PC heatmaps\n")
+```
+
+
+```{r  slice_pca, include=FALSE }
+
+pca_df$ellipse_group <- dplyr::case_when(
+  pca_df$treatment %in% c("WT1", "WT2", "CONTROL") ~ "CONTROL_GROUP",
+  pca_df$treatment %in% c("TG1", "REVERSA")        ~ "TG1_REVERSA_GROUP",
+  pca_df$treatment %in% c("TG2", "RRAC226")        ~ "TG2_RRAC226_GROUP",
+  pca_df$treatment == "REVREV"                     ~ "REVREV",
+  TRUE ~ NA_character_
+)
+
+slice_sex <- seurat_all@meta.data %>%
+  filter(!is.na(slice_id)) %>%
+  distinct(slice_id, sex)
+
+pca_df <- left_join(pca_df, slice_sex, by = "slice_id")
+
+
+p_pc1_pc2 <- ggplot(pca_df, aes(PC1, PC2)) +
+
+  ## POINTS
+  geom_point(
+    aes(color = treatment, shape = sex),
+    size = 2,
+    alpha = 0.9
+  ) +
+  scale_color_manual(values = treat_colors, name = "Treatment Group") +
+
+  ggnewscale::new_scale_color() +
+
+  ## ELLIPSES
+  stat_ellipse(
+    aes(group = ellipse_group, color = ellipse_group),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.6
+  ) +
+  scale_color_manual(
+    values = c(
+      CONTROL_GROUP     = "#1f77b4",
+      TG1_REVERSA_GROUP = "#2ca02c",
+      TG2_RRAC226_GROUP = "#ff7f0e",
+      REVREV            = "#d62728"
+    ),
+    name = "Ellipse Group"
+  ) +
+
+  scale_shape_manual(values = c(Female = 16, Male = 17)) +
+
+  geom_text_repel(aes(label = slice_id), size = 2) +
+
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Slice-level PCA (Combined Male + Female)",
+    x = paste0("PC1 (", round(pca_var[1], 1), "%)"),
+    y = paste0("PC2 (", round(pca_var[2], 1), "%)")
+  )
+
+
+save_plot(p_pc1_pc2,paste0(FILE_PREFIX,"SlicePCA_PC1_vs_PC2_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
+cat("✓ Saved: SlicePCA_PC1_vs_PC2_ByTreatment.png\n")
+p_pc1_pc2
+
+p_pc2_pc3 <- ggplot(pca_df, aes(PC2, PC3)) +
+
+  ## POINTS
+  geom_point(
+    aes(color = treatment, shape = sex),
+    size = 2,
+    alpha = 0.9
+  ) +
+  scale_color_manual(values = treat_colors, name = "Treatment Group") +
+
+  ggnewscale::new_scale_color() +
+
+  ## ELLIPSES
+  stat_ellipse(
+    aes(group = ellipse_group, color = ellipse_group),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.6
+  ) +
+  scale_color_manual(
+    values = c(
+      CONTROL_GROUP     = "#1f77b4",
+      TG1_REVERSA_GROUP = "#2ca02c",
+      TG2_RRAC226_GROUP = "#ff7f0e",
+      REVREV            = "#d62728"
+    ),
+    name = "Ellipse Group"
+  ) +
+
+  scale_shape_manual(values = c(Female = 16, Male = 17)) +
+
+  geom_text_repel(aes(label = slice_id), size = 2) +
+
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Slice-level PCA (Combined Male + Female)",
+    subtitle = paste0("PC2 vs PC3, n = ", nrow(pca_df), " slices"),
+    x = paste0("PC2 (", round(pca_var[2], 1), "%)"),
+    y = paste0("PC3 (", round(pca_var[3], 1), "%)")
+  )
+
+save_plot(p_pc2_pc3,paste0(FILE_PREFIX,"SlicePCA_PC2_vs_PC3_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
+cat("✓ Saved: SlicePCA_PC2_vs_PC3_ByTreatment.png\n")
+p_pc2_pc3
 ```
 ```{r save_final, include=FALSE}
 ############################################################
@@ -670,8 +977,8 @@ cat("✓ Saved: All PC heatmaps\n")
 ############################################################
 
 cat("\nSaving final Seurat object...\n")
-saveRDS(male, file = file.path(root_dir, "Male_Seurat_all_genes.rds"))
-cat("✓ Saved: Male_Seurat_all_genes.rds\n")
+saveRDS(seurat_all, file = file.path(root_dir, "Combined_Male_Female_Seurat_filtered.rds"))
+cat("✓ Saved: Combined_Male_Female_Seurat_filtered.rds\n")
 
 ############################################################
 ## 15. SESSION INFO (FOR REPRODUCIBILITY)

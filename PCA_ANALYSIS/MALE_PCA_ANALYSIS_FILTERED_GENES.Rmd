@@ -24,9 +24,12 @@ suppressPackageStartupMessages({
 ## 0. PATHS (EDIT IF NEEDED)
 ############################################################
 
-root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/NEW_PCA_ANALYSIS/MALE_PCA_FILTERED_GENES_RESULTS"
+root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/NEW_PCA_ANALYSIS_JAN23/MALE_PCA_FILTERED_GENES_RESULTS"
 
-male_its2_path <- "/Users/preddy/Desktop/Lab_Streeter_new/Male/ITS2.csv"
+male_its2_path <- "~/Desktop/Lab_Streeter_new/DATA/MALE/ITS2.csv"
+
+FILE_PREFIX<- "MALE_FILTERED_GENES_"
+
 
 male_paths <- list(
   CONTROL = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/Control_filtered_feature_bc_matrix.h5",
@@ -321,7 +324,7 @@ p_violin_sample <- VlnPlot(
   ncol = 3
 )
 
-save_plot(p_violin_sample, "QC_Violin_BySample.png", 12, 5, subdir = dir_map$QC)
+save_plot(p_violin_sample, paste0(FILE_PREFIX,"QC_Violin_BySample.png"), 12, 5, subdir = dir_map$QC)
 cat("✓ Saved: QC_Violin_BySample.png\n")
 ```
 ```{r normalize_variable_features, include=FALSE}
@@ -343,7 +346,7 @@ p_var <- p_var +
     subtitle = paste0("n = ", length(VariableFeatures(male)), " genes")
   )
 
-save_plot(p_var, "VariableFeatures.png", 8, 6, subdir = dir_map$QC)
+save_plot(p_var, paste0(FILE_PREFIX,"VariableFeatures.png"), 8, 6, subdir = dir_map$QC)
 cat("✓ Saved: VariableFeatures.png\n")
 p_var
 ```
@@ -359,7 +362,7 @@ male <- RunPCA(male, npcs = 30)
 p_elbow <- ElbowPlot(male, ndims = 30) +
   labs(title = "Elbow Plot (Cell-level PCA)")
 
-save_plot(p_elbow, "ElbowPlot_CellLevel.png", 7, 5, subdir = dir_map$Cell_Level)
+save_plot(p_elbow, paste0(FILE_PREFIX,"ElbowPlot_CellLevel.png"), 7, 5, subdir = dir_map$Cell_Level)
 cat("✓ Saved: ElbowPlot_CellLevel.png\n")
 p_elbow
 
@@ -384,7 +387,7 @@ p_umap_sample <- DimPlot(
     title = "UMAP by Sample (Male)",
     color = "Sample"
   )
-save_plot(p_umap_sample, "UMAP_BySample.png", 9, 6, subdir = dir_map$UMAP)
+save_plot(p_umap_sample, paste0(FILE_PREFIX,"UMAP_BySample.png"), 9, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_BySample.png\n")
 
 p_umap_sample
@@ -398,7 +401,7 @@ p_genes <- FeaturePlot(male, features = "genes_expressed", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "Genes expressed per spot (UMAP)")
 
-save_plot(p_genes, "UMAP_GenesExpressed.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_genes, paste0(FILE_PREFIX,"UMAP_GenesExpressed.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_GenesExpressed.png\n")
 p_genes
 
@@ -406,7 +409,7 @@ p_mt <- FeaturePlot(male, features = "percent.mt", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "percent.mt (UMAP)")
 
-save_plot(p_mt, "UMAP_percentMT.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_mt, paste0(FILE_PREFIX,"UMAP_percentMT.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_percentMT.png\n")
 p_mt
 
@@ -414,7 +417,7 @@ p_nFeature <- FeaturePlot(male, features = "nFeature_RNA", reduction = "umap") +
   theme_minimal(base_size = 14) +
   labs(title = "nFeature_RNA (UMAP)")
 
-save_plot(p_nFeature, "UMAP_nFeatureRNA.png", 7, 6, subdir = dir_map$UMAP)
+save_plot(p_nFeature ,paste0(FILE_PREFIX,"UMAP_nFeatureRNA.png"), 7, 6, subdir = dir_map$UMAP)
 cat("✓ Saved: UMAP_nFeatureRNA.png\n")
 p_nFeature
 ```
@@ -430,14 +433,14 @@ male_its$slice_id <- clean_slice_id(male_its$ITS2)
 
 male_slice_treatment <- data.frame(
   slice_id = c(
-    "314A ITS", "321A", "321B",
-    "45-3A", "45-4A", "45-4B", "54-3B",
+    "314A", "321A", "321B",
+    "45-4A", "45-4B",
     "49-1A", "49-1B",
     "45-1A", "45-1B", "45-1C", "45-1D", "45-2A", "45-2B", "45-2C"
   ),
   sample_label = c(
     rep("CONTROL", 3),
-    rep("REVERSA", 4),
+    rep("REVERSA", 2),
     rep("REVREV", 2),
     rep("RRAC226", 7)
   ),
@@ -533,7 +536,7 @@ pca_df <- data.frame(
 
 pca_df <- left_join(pca_df, slice_treatment, by = "slice_id")
 
-write.csv(pca_df, file.path(dir_map$Slice_PCA, "SlicePCA_Coordinates_PC1_PC2_PC3.csv"), row.names = FALSE)
+write.csv(pca_df, file.path(dir_map$Slice_PCA, paste0(FILE_PREFIX,"SlicePCA_Coordinates_PC1_PC2_PC3.csv")), row.names = FALSE)
 ```
 ```{r slice_pca_plots, include=FALSE}
 ############################################################
@@ -570,7 +573,7 @@ p_pc1_pc2 <- ggplot(
   ) +
   scale_color_manual(values = treat_colors, name = "Treatment Group")
 
-save_plot(p_pc1_pc2, "SlicePCA_PC1_vs_PC2_ByTreatment.png", 8, 6, subdir = dir_map$Slice_PCA)
+save_plot(p_pc1_pc2, paste0(FILE_PREFIX,"SlicePCA_PC1_vs_PC2_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
 cat("✓ Saved: SlicePCA_PC1_vs_PC2_ByTreatment.png\n")
 p_pc1_pc2
 
@@ -600,7 +603,7 @@ p_pc2_pc3 <- ggplot(pca_df, aes(PC2, PC3, color = treatment, label = slice_id, g
   ) +
   scale_color_manual(values = treat_colors, name = "Treatment Group")
 
-save_plot(p_pc2_pc3, "SlicePCA_PC2_vs_PC3_ByTreatment.png", 8, 6, subdir = dir_map$Slice_PCA)
+save_plot(p_pc2_pc3, paste0(FILE_PREFIX,"SlicePCA_PC2_vs_PC3_ByTreatment.png"), 8, 6, subdir = dir_map$Slice_PCA)
 cat("✓ Saved: SlicePCA_PC2_vs_PC3_ByTreatment.png\n")
 p_pc2_pc3
 ```
@@ -612,7 +615,7 @@ p_pc2_pc3
 cat("Saving PC loadings...\n")
 loadings_tbl <- save_pc_loadings(
   pca_result,
-  out_csv = file.path(dir_map$Loadings, "Top_PC_Loadings_PC1_PC2_PC3.csv"),
+  out_csv = file.path(dir_map$Loadings,paste0(FILE_PREFIX,"Top_PC_Loadings_PC1_PC2_PC3.csv")),
   top_n = 30
 )
 
@@ -672,8 +675,7 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Default clustering)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_Default.png")),
-    width = 9, height = 10
+ filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Default.png")),    width = 9, height = 10
   )
 
   ## 2) BY TREATMENT (no column clustering)
@@ -686,7 +688,7 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Ordered by Treatment)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_ByTreatment.png")),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_ByTreatment.png")),
     width = 9, height = 10
   )
 
@@ -703,7 +705,7 @@ for (pc in c("PC1","PC2","PC3")) {
     annotation_colors = ann_colors,
     color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(100),
     main = paste(pc, "top loading genes (Ordered by PC score)"),
-    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0("Heatmap_", pc, "_ByLikeness.png")),
+    filename = file.path(dir_map$PCA_Heatmaps, pc, paste0(FILE_PREFIX,"Heatmap_", pc, "_Score.png")),
     width = 9, height = 10
   )
 }
