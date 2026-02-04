@@ -546,6 +546,31 @@ write.csv(
   quote = FALSE
 )
 
+top20_genes <- head(VariableFeatures(vic_seurat), 20)
+
+cat("Top 20 variable genes across VIC clusters:\n")
+print(top20_genes)
+expr_matrix <- GetAssayData(subset_obj, slot = "data", assay = "RNA")[top20_genes, , drop = FALSE]
+
+output_file_hvg <- "~/Desktop/Lab_Streeter_new/CLUSTER_ANALYSIS/VIC_cluster_weighted_expression_TOP20_HVG.csv"
+
+# Subset output_df to top 2000 HVGs
+output_df_hvg <- output_df %>%
+  dplyr::filter(Gene %in% top20_genes)
+
+cat("HVG-only output dimensions:",
+    nrow(output_df_hvg), "genes x",
+    ncol(output_df_hvg), "columns\n")
+
+
+write.csv(
+  output_df_hvg,
+  output_file_hvg,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+
 cat("\nHVG-based output saved to:", output_file_hvg, "\n")
 
 
