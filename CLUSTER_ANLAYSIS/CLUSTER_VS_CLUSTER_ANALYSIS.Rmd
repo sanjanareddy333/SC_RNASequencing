@@ -1,0 +1,552 @@
+---
+title: "CLUSTER_VS_CLUSTER_ANALYSIS"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+```{r load-libraries}
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(Matrix)
+```
+
+## Helper Functions
+
+```{r helper-functions}
+# Clean barcode format
+clean_barcode <- function(bc) {
+  bc <- sub("^.*_", "", bc)
+  bc <- sub("-\\d+$", "", bc)
+  bc
+}
+
+# Clean slice ID
+clean_slice_id <- function(x) {
+  x <- trimws(x)
+  x <- sub("\\s+ITS$", "", x)
+  x
+}
+
+# Compute number of genes expressed per spot
+compute_genes_expressed <- function(seu) {
+  # Join layers if needed for Seurat v5
+  if (inherits(seu[["RNA"]], "Assay5")) {
+    seu[["RNA"]] <- JoinLayers(seu[["RNA"]])
+  }
+  
+  counts_mat <- GetAssayData(seu, assay = "RNA", slot = "counts")
+  seu$genes_expressed <- Matrix::colSums(counts_mat > 0)
+  seu
+}
+
+# Get genes to exclude (cardiac, RBC, mitochondrial)
+get_genes_to_exclude <- function(all_genes) {
+  ## Explicit gene list
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+  
+  ## Find genes matching exclusion criteria
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes) 
+  ]
+  
+  return(unique(exclude_genes))
+}
+```
+
+## 1. Load Female Dataset
+
+```{r load-female-data}
+# Define paths to H5 files
+female_paths <- list(
+  WT1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control1_filtered_feature_bc_matrix.h5",
+  WT2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/WT_Control2_filtered_feature_bc_matrix.h5",
+  TG1 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group1_filtered_feature_bc_matrix.h5",
+  TG2 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Female_DataSet/data/Treatment_Group2_filtered_feature_bc_matrix.h5"
+)
+
+# Load each sample
+cat("Loading female dataset samples...\n")
+seurat_list <- list()
+
+for (sample_name in names(female_paths)) {
+  cat("  Loading", sample_name, "...\n")
+  
+  # Load 10x data
+  counts <- Read10X_h5(female_paths[[sample_name]])
+  
+  # Create Seurat object
+  seu <- CreateSeuratObject(
+    counts = counts,
+    project = sample_name
+  )
+  
+  # Add sample metadata
+  seu$sample <- sample_name
+  
+  seurat_list[[sample_name]] <- seu
+  
+  cat("    Loaded:", ncol(seu), "spots,", nrow(seu), "genes\n")
+}
+
+# Merge all samples
+cat("\nMerging samples...\n")
+seurat_obj <- merge(
+  seurat_list[[1]],
+  y = seurat_list[2:length(seurat_list)],
+  add.cell.ids = names(seurat_list),
+  project = "Female_VIC"
+)
+
+cat("Merged object:", ncol(seurat_obj), "spots,", nrow(seurat_obj), "genes\n")
+
+# Join layers for Seurat v5 compatibility
+cat("Joining layers for Seurat v5...\n")
+seurat_obj[["RNA"]] <- JoinLayers(seurat_obj[["RNA"]])
+```
+
+## 2. Filter Genes
+
+```{r filter-genes}
+# Get all genes
+all_genes <- rownames(seurat_obj)
+
+# Identify genes to exclude
+exclude_genes <- get_genes_to_exclude(all_genes)
+
+cat("Total genes before filtering:", length(all_genes), "\n")
+cat("Genes to exclude:", length(exclude_genes), "\n")
+cat("  Cardiac/RBC/Mitochondrial genes removed\n")
+
+# Keep only genes NOT in the exclusion list
+genes_to_keep <- setdiff(all_genes, exclude_genes)
+
+# Subset Seurat object
+seurat_obj <- seurat_obj[genes_to_keep, ]
+
+cat("Total genes after filtering:", nrow(seurat_obj), "\n")
+```
+
+## 3. Standard Processing
+
+```{r process-data}
+# Compute genes expressed
+seurat_obj <- compute_genes_expressed(seurat_obj)
+
+# Normalize data
+cat("\nNormalizing data...\n")
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+
+cat("Processing complete!\n")
+cat("Final object:", ncol(seurat_obj), "spots,", nrow(seurat_obj), "genes\n")
+```
+
+## 4. Load Loupe Spot Lists
+
+```{r load-loupe-data}
+# Define paths to your Loupe-exported CSV files
+# UPDATE THESE PATHS to match your file locations
+loupe_files <- list(
+  Cluster4 = "~/Desktop/Lab_Streeter_new/DATA/Cluster 4.csv",
+  Cluster5 = "~/Desktop/Lab_Streeter_new/DATA/Cluster 5.csv",
+  Cluster7 = "~/Desktop/Lab_Streeter_new/DATA/Cluster 7.csv"
+)
+
+# OR if you want to use the uploaded file for testing:
+# loupe_files <- list(
+#   Cluster4 = "/mnt/user-data/uploads/Cluster_4.csv"
+# )
+
+# Function to parse Loupe CSV and extract spots by condition
+parse_loupe_csv <- function(csv_path, cluster_name) {
+  cat("\nParsing", csv_path, "for", cluster_name, "...\n")
+  
+  # Read CSV
+  data <- read.csv(csv_path, header = TRUE, stringsAsFactors = FALSE)
+  
+  # The file has two columns: Barcode and cluster/condition info
+  # Column 2 contains text like "Cluster 4 WT", "Cluster 4 REV", "Cluster 4 RRAC"
+  colnames(data) <- c("Barcode", "Cluster_Condition")
+  
+  # Extract condition from the second column
+  # Split by space and take the last word
+  data$Condition <- sapply(strsplit(data$Cluster_Condition, " "), function(x) x[length(x)])
+  
+  # Clean barcodes
+  data$Barcode_Clean <- clean_barcode(data$Barcode)
+  
+  # Split by condition
+  conditions <- c("WT", "REV", "RRAC")
+  spot_lists <- list()
+  
+  for (cond in conditions) {
+    spots <- data$Barcode[data$Condition == cond]
+    spots_clean <- clean_barcode(spots)
+    
+    cat("  ", cond, ":", length(spots), "spots\n")
+    spot_lists[[cond]] <- spots_clean
+  }
+  
+  return(spot_lists)
+}
+
+# Load all cluster spot lists
+all_cluster_spots <- list()
+
+for (cluster in names(loupe_files)) {
+  all_cluster_spots[[cluster]] <- parse_loupe_csv(
+    loupe_files[[cluster]], 
+    cluster
+  )
+}
+```
+
+## 5. Calculate Average Expression by Cluster-Condition
+
+```{r calculate-averages}
+# Get cleaned barcodes from Seurat object
+seurat_barcodes_clean <- clean_barcode(colnames(seurat_obj))
+
+# Initialize storage
+avg_expression_list <- list()
+spot_counts <- list()
+
+# Process each cluster
+for (cluster in names(all_cluster_spots)) {
+  cat("\n=== Processing", cluster, "===\n")
+  
+  cluster_results <- list()
+  cluster_counts <- list()
+  
+  # Process each condition
+  for (condition in c("WT", "REV", "RRAC")) {
+    cat("  Calculating average for", condition, "...\n")
+    
+    # Get spot IDs for this cluster-condition
+    spot_ids_clean <- all_cluster_spots[[cluster]][[condition]]
+    
+    # Find which spots are in the Seurat object
+    spots_in_seurat <- spot_ids_clean %in% seurat_barcodes_clean
+    spots_to_use <- spot_ids_clean[spots_in_seurat]
+    
+    # Get original barcode names from Seurat object
+    matching_indices <- match(spots_to_use, seurat_barcodes_clean)
+    original_barcodes <- colnames(seurat_obj)[matching_indices]
+    
+    cat("    Total spots in Loupe:", length(spot_ids_clean), "\n")
+    cat("    Spots found in Seurat:", length(original_barcodes), "\n")
+    
+    # Store spot count
+    cluster_counts[[condition]] <- length(original_barcodes)
+    
+    # Calculate average expression
+    if (length(original_barcodes) > 0) {
+      # Subset to these spots
+      subset_obj <- seurat_obj[, original_barcodes]
+      
+      # Join layers for Seurat v5 compatibility
+      if (inherits(subset_obj[["RNA"]], "Assay5")) {
+        subset_obj[["RNA"]] <- JoinLayers(subset_obj[["RNA"]])
+      }
+      
+      # Get expression matrix for these spots
+      expr_matrix <- GetAssayData(subset_obj, 
+                                   slot = "data", 
+                                   assay = "RNA")
+      
+      # Calculate average across all spots
+      avg_expr <- Matrix::rowMeans(expr_matrix)
+      
+      cluster_results[[condition]] <- avg_expr
+      cat("    Average expression calculated for", length(avg_expr), "genes\n")
+    } else {
+      warning(paste("No spots found for", cluster, condition))
+      cluster_results[[condition]] <- rep(0, nrow(seurat_obj))
+      names(cluster_results[[condition]]) <- rownames(seurat_obj)
+    }
+  }
+  
+  # Store results
+  avg_expression_list[[cluster]] <- cluster_results
+  spot_counts[[cluster]] <- cluster_counts
+  
+  cat("  Spot counts:", paste(names(cluster_counts), unlist(cluster_counts), 
+                               sep = "=", collapse = ", "), "\n")
+}
+```
+
+## 6. Calculate Condition Weights
+
+```{r calculate-weights}
+# Calculate weights for each cluster based on spot counts
+weights <- list()
+
+cat("\n=== Calculating Weights ===\n")
+for (cluster in names(all_cluster_spots)) {
+  total_spots <- sum(unlist(spot_counts[[cluster]]))
+  
+  if (total_spots > 0) {
+    cluster_weights <- lapply(spot_counts[[cluster]], function(x) x / total_spots)
+    weights[[cluster]] <- cluster_weights
+    
+    cat("\n", cluster, "weights:\n")
+    cat(sprintf("  WT:   %.4f (n = %d)\n", 
+                cluster_weights$WT, spot_counts[[cluster]]$WT))
+    cat(sprintf("  REV:  %.4f (n = %d)\n", 
+                cluster_weights$REV, spot_counts[[cluster]]$REV))
+    cat(sprintf("  RRAC: %.4f (n = %d)\n", 
+                cluster_weights$RRAC, spot_counts[[cluster]]$RRAC))
+  } else {
+    warning(paste("No spots found for", cluster))
+    weights[[cluster]] <- list(WT = 0, REV = 0, RRAC = 0)
+  }
+}
+```
+
+## 7. Calculate Weighted Averages
+
+```{r weighted-averages}
+# Calculate weighted average expression for each cluster
+weighted_averages <- list()
+
+cat("\n=== Calculating Weighted Averages ===\n")
+for (cluster in names(all_cluster_spots)) {
+  wt_avg <- avg_expression_list[[cluster]]$WT
+  rev_avg <- avg_expression_list[[cluster]]$REV
+  rrac_avg <- avg_expression_list[[cluster]]$RRAC
+  
+  # Weighted average
+  weighted_avg <- (wt_avg * weights[[cluster]]$WT) + 
+                  (rev_avg * weights[[cluster]]$REV) + 
+                  (rrac_avg * weights[[cluster]]$RRAC)
+  
+  weighted_averages[[cluster]] <- weighted_avg
+  
+  cat("  Weighted average calculated for", cluster, "\n")
+}
+```
+
+## 8. Create Combined Output CSV
+
+```{r create-output}
+# Get all genes (after filtering)
+all_genes <- rownames(seurat_obj)
+
+# Create column names mapping
+cluster_mapping <- list(
+  Cluster4 = c("C4_WT", "C4_REV", "C4_RRAC", "Average_Cluster4"),
+  Cluster5 = c("C5_WT", "C5_REV", "C5_RRAC", "Average_Cluster5"),
+  Cluster7 = c("C7_WT", "C7_REV", "C7_RRAC", "Average_Cluster7")
+)
+
+# Build the output data frame dynamically
+output_df <- data.frame(Gene = all_genes, stringsAsFactors = FALSE)
+
+for (cluster in names(all_cluster_spots)) {
+  # Add condition-specific columns
+  output_df[[cluster_mapping[[cluster]][1]]] <- avg_expression_list[[cluster]]$WT
+  output_df[[cluster_mapping[[cluster]][2]]] <- avg_expression_list[[cluster]]$REV
+  output_df[[cluster_mapping[[cluster]][3]]] <- avg_expression_list[[cluster]]$RRAC
+  
+  # Add weighted average column
+  output_df[[cluster_mapping[[cluster]][4]]] <- weighted_averages[[cluster]]
+}
+
+
+
+# Round to 4 decimal places
+numeric_cols <- 2:ncol(output_df)
+output_df[, numeric_cols] <- round(output_df[, numeric_cols], 4)
+
+# Save to CSV
+output_file <- "~/Desktop/Lab_Streeter_new/CLUSTER_ANALYSIS/VIC_cluster_weighted_expression_filtered.csv"
+write.csv(output_df, output_file, row.names = FALSE, quote = FALSE)
+
+cat("\n=== Output saved to:", output_file, "===\n")
+cat("Dimensions:", nrow(output_df), "genes x", ncol(output_df), "columns\n")
+cat("\nColumn structure:\n")
+cat("  - Gene (gene names)\n")
+cat("  - For each cluster (4, 5, 7):\n")
+cat("    * Condition averages (WT, REV, RRAC)\n")
+cat("    * Weighted average\n")
+cat("  - Total columns:", ncol(output_df), "\n")
+```
+
+## 9. Preview Results
+
+```{r preview-results}
+# Show structure
+cat("\nColumn names:\n")
+print(colnames(output_df))
+
+cat("\nFirst 10 genes:\n")
+print(head(output_df, 10))
+
+# Summary statistics
+cat("\nSummary of weighted averages:\n")
+weighted_cols <- grep("Average_Cluster", colnames(output_df), value = TRUE)
+print(summary(output_df[, weighted_cols]))
+```
+
+## 10. Spot Count and Weight Summary
+
+```{r spot-summary}
+# Create summary table
+summary_rows <- list()
+
+for (cluster in names(all_cluster_spots)) {
+  for (condition in c("WT", "REV", "RRAC")) {
+    summary_rows[[length(summary_rows) + 1]] <- data.frame(
+      Cluster = cluster,
+      Condition = condition,
+      Spot_Count = spot_counts[[cluster]][[condition]],
+      Weight = weights[[cluster]][[condition]],
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+summary_df <- do.call(rbind, summary_rows)
+summary_df$Weight <- round(summary_df$Weight, 4)
+
+print(summary_df)
+
+# Save summary
+write.csv(summary_df, "~/Desktop/Lab_Streeter_new/CLUSTER_ANALYSIS/VIC_cluster_spot_counts_and_weights.csv", 
+          row.names = FALSE, quote = FALSE)
+
+cat("\nSpot count summary saved to: VIC_cluster_spot_counts_and_weights.csv\n")
+```
+
+## 11. Quality Control Plots
+
+```{r qc-plots, fig.width=10, fig.height=6}
+# Plot spot counts by cluster and condition
+library(ggplot2)
+
+p1 <- ggplot(summary_df, aes(x = Cluster, y = Spot_Count, fill = Condition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Spot Counts by Cluster and Condition",
+       x = "Cluster", y = "Number of Spots") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p1)
+
+# Plot weights
+p2 <- ggplot(summary_df, aes(x = Cluster, y = Weight, fill = Condition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Condition Weights by Cluster",
+       x = "Cluster", y = "Weight") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = scales::percent)
+
+print(p2)
+```
+```{r  Analysis-Top2000Genes}
+# Collect all cleaned barcodes from clusters 4, 5, 7
+all_vic_spots_clean <- unique(unlist(lapply(all_cluster_spots, function(cluster) {
+  unlist(cluster)
+})))
+
+cat("Total unique VIC spots (clusters 4,5,7):", length(all_vic_spots_clean), "\n")
+
+# Clean barcodes from Seurat object
+seurat_barcodes_clean <- clean_barcode(colnames(seurat_obj))
+
+# Find matching spots
+vic_indices <- match(all_vic_spots_clean, seurat_barcodes_clean)
+vic_indices <- vic_indices[!is.na(vic_indices)]
+
+vic_barcodes <- colnames(seurat_obj)[vic_indices]
+
+cat("VIC spots found in Seurat:", length(vic_barcodes), "\n")
+
+vic_seurat <- seurat_obj[, vic_barcodes]
+
+# Seurat v5 safety
+if (inherits(vic_seurat[["RNA"]], "Assay5")) {
+  vic_seurat[["RNA"]] <- JoinLayers(vic_seurat[["RNA"]])
+}
+
+cat("VIC-only object:", ncol(vic_seurat), "spots,", nrow(vic_seurat), "genes\n")
+
+# Find variable features across VIC clusters
+vic_seurat <- FindVariableFeatures(
+  vic_seurat,
+  assay = "RNA",
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+# Plot HVGs
+p_var <- VariableFeaturePlot(vic_seurat)
+
+top20_genes <- head(VariableFeatures(vic_seurat), 20)
+
+p_var <-LabelPoints(
+  plot = p_var,
+  points = top20_genes,
+  repel = TRUE
+)
+
+p_var <- p_var + 
+  labs(
+    title = "Highly Variable Genes",
+    subtitle = paste0("n = ", length(VariableFeatures(female)), " genes")
+  )
+
+
+ggsave(
+  filename = "~/Desktop/Lab_Streeter_new/CLUSTER_ANALYSIS/VIC_VariableFeaturePlot.png",
+  plot = p_var,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+cat("✓ Saved: VariableFeatures.png\n")
+
+
+top2000_genes <- head(VariableFeatures(vic_seurat), 2000)
+
+cat("Top 2000 variable genes across VIC clusters:\n")
+print(top2000_genes)
+expr_matrix <- GetAssayData(subset_obj, slot = "data", assay = "RNA")[top2000_genes, , drop = FALSE]
+
+output_file_hvg <- "~/Desktop/Lab_Streeter_new/CLUSTER_ANALYSIS/VIC_cluster_weighted_expression_TOP2000_HVG.csv"
+
+# Subset output_df to top 2000 HVGs
+output_df_hvg <- output_df %>%
+  dplyr::filter(Gene %in% top2000_genes)
+
+cat("HVG-only output dimensions:",
+    nrow(output_df_hvg), "genes x",
+    ncol(output_df_hvg), "columns\n")
+
+
+write.csv(
+  output_df_hvg,
+  output_file_hvg,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nHVG-based output saved to:", output_file_hvg, "\n")
+
+
+```
