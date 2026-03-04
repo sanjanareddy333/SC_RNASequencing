@@ -1,0 +1,257 @@
+---
+title: "CHAT_ANALYSIS"
+output: html_document
+---
+
+```{rsetup }
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(stringr)
+library(openxlsx)
+
+# 1️⃣ Read Excel
+df <- read_excel(
+  "~/Desktop/Lab_Streeter_new/EpicCosmicData/Latest/Epic Cosmos Master HOA Data Final.xlsx",
+  sheet = "Diagnoses + Medications"
+)
+
+names(df)[1] <- "Group_Info"
+names(df) <- make.names(names(df))
+
+# 2️⃣ Extract Group / Sex / Age
+df <- df %>%
+  mutate(
+    Group = case_when(
+      str_detect(Group_Info, "^HOA") ~ "HOA",
+      str_detect(Group_Info, "^Normal") ~ "Normal"
+    ),
+    Sex = case_when(
+      str_detect(Group_Info, "Males") ~ "Male",
+      str_detect(Group_Info, "Females") ~ "Female"
+    ),
+    Age = str_extract(Group_Info, "\\d+-\\d+|80\\+")
+  )
+
+# 3️⃣ Separate prevalence and CI rows
+prev_df <- df %>%
+  filter(!str_detect(Group_Info, "95% CI"))
+
+colnames(prev_df)
+
+
+ci_df <- df %>%
+  filter(str_detect(Group_Info, "95% CI")) %>%
+  mutate(Group_Info = str_remove(Group_Info, " 95% CI"))
+
+# 4️⃣ Identify outcome columns
+meta <- c("Group_Info", "Group", "Sex", "Age", "Number.of.patients")
+outcomes <- setdiff(names(prev_df), meta)
+
+# Convert to numeric (remove % if present)
+prev_df[outcomes] <- lapply(prev_df[outcomes], function(x) {
+  x <- gsub("%", "", x)
+  x <- gsub(",", "", x)
+  as.numeric(x)
+})
+
+ci_df[outcomes] <- lapply(ci_df[outcomes], function(x) {
+  x <- gsub("%", "", x)
+  x <- gsub(",", "", x)
+  as.numeric(x)
+})
+
+# 5️⃣ Pivot to long format
+prev_long <- prev_df %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Prev"
+  )
+
+ci_long <- ci_df %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "CI"
+  )
+
+# 6️⃣ Join prevalence and CI
+long <- prev_long %>%
+  left_join(
+    ci_long %>% select(Group, Sex, Age, Outcome, CI),
+    by = c("Group", "Sex", "Age", "Outcome")
+  ) %>%
+  mutate(
+    # Convert CI to halfwidth in percentage points (document methodology)
+    CI_halfwidth = ifelse(CI < 1, CI * 100, CI),
+    # Calculate SE from CI halfwidth
+    SE = CI_halfwidth / 1.96
+  )
+
+# 7️⃣ Split strata for contrasts
+hm <- long %>% filter(Group=="HOA", Sex=="Male") %>% 
+  rename(Prev_hm=Prev, SE_hm=SE)
+cm <- long %>% filter(Group=="Normal", Sex=="Male") %>% 
+  rename(Prev_cm=Prev, SE_cm=SE)
+hf <- long %>% filter(Group=="HOA", Sex=="Female") %>% 
+  rename(Prev_hf=Prev, SE_hf=SE)
+cf <- long %>% filter(Group=="Normal", Sex=="Female") %>% 
+  rename(Prev_cf=Prev, SE_cf=SE)
+
+# 8️⃣ Join all strata
+joined <- hm %>%
+  full_join(cm, by=c("Age","Outcome")) %>%
+  full_join(hf, by=c("Age","Outcome")) %>%
+  full_join(cf, by=c("Age","Outcome"))
+
+# 9️⃣ Calculate per-age contrasts
+per_age <- joined %>%
+  mutate(
+    HOA_Males = Prev_hm - Prev_cm,
+    se_HOA_Males = sqrt(SE_hm^2 + SE_cm^2),
+    HOA_Females = Prev_hf - Prev_cf,
+    se_HOA_Females = sqrt(SE_hf^2 + SE_cf^2),
+    Controls = Prev_cf - Prev_cm,
+    se_Controls = sqrt(SE_cf^2 + SE_cm^2),
+    Interaction = (Prev_hf - Prev_cf) - (Prev_hm - Prev_cm),
+    se_Interaction = sqrt((SE_hf^2 + SE_cf^2) + (SE_hm^2 + SE_cm^2))
+  )
+
+# 🔟 IVW pooling function
+ivw_pool <- function(effects, ses) {
+  ok <- !is.na(effects) & !is.na(ses) & ses > 0
+  effects <- effects[ok]
+  ses <- ses[ok]
+  k <- length(effects)
+  if (k == 0) {
+    return(tibble(Age_bins=NA, Beta_pp=NA, CI_low=NA, CI_high=NA, p=NA))
+  }
+  w <- 1 / (ses^2)
+  beta <- sum(w * effects) / sum(w)
+  se <- sqrt(1 / sum(w))
+  z <- beta / se
+  p <- 2 * (1 - pnorm(abs(z)))
+  tibble(
+    Age_bins = k,
+    Beta_pp = beta,
+    CI_low = beta - 1.96 * se,
+    CI_high = beta + 1.96 * se,
+    p = p
+  )
+}
+
+# 1️⃣1️⃣ Pool per outcome
+res <- per_age %>%
+  group_by(Outcome) %>%
+  group_modify(~{
+    bind_rows(
+      ivw_pool(.x$Controls, .x$se_Controls) %>% mutate(Effect="Controls"),
+      ivw_pool(.x$HOA_Females, .x$se_HOA_Females) %>% mutate(Effect="HOA_Females"),
+      ivw_pool(.x$HOA_Males, .x$se_HOA_Males) %>% mutate(Effect="HOA_Males"),
+      ivw_pool(.x$Interaction, .x$se_Interaction) %>% mutate(Effect="Interaction")
+    )
+  }) %>%
+  ungroup()
+
+# 1️⃣2️⃣ BH correction
+res <- res %>%
+  group_by(Effect) %>%
+  mutate(q_BH = p.adjust(p, "BH")) %>%
+  ungroup()
+
+# 1️⃣3️⃣ Wide format
+final_output <- res %>%
+  pivot_wider(
+    id_cols = Outcome,
+    names_from = Effect,
+    values_from = c(Age_bins, Beta_pp, CI_low, CI_high, p, q_BH),
+    names_sep = "_"
+  ) %>%
+  # Filter out completely empty rows
+  filter(!is.na(Beta_pp_Controls) | !is.na(Beta_pp_HOA_Females) | 
+         !is.na(Beta_pp_HOA_Males) | !is.na(Beta_pp_Interaction)) %>%
+  # Reorder columns
+  select(
+    Outcome,
+    Age_bins_Controls, Beta_pp_Controls, CI_low_Controls, CI_high_Controls, 
+    p_Controls, q_BH_Controls,
+    Age_bins_HOA_Females, Beta_pp_HOA_Females, CI_low_HOA_Females, CI_high_HOA_Females,
+    p_HOA_Females, q_BH_HOA_Females,
+    Age_bins_HOA_Males, Beta_pp_HOA_Males, CI_low_HOA_Males, CI_high_HOA_Males,
+    p_HOA_Males, q_BH_HOA_Males,
+    Age_bins_Interaction, Beta_pp_Interaction, CI_low_Interaction, CI_high_Interaction,
+    p_Interaction, q_BH_Interaction
+  )
+
+# 1️⃣4️⃣ Create Excel with formatted headers
+wb <- createWorkbook()
+addWorksheet(wb, "Results")
+
+# Write header row 1
+writeData(wb, 1, "Outcome", startCol = 1, startRow = 1)
+writeData(wb, 1, "Female vs Male (Controls)", startCol = 2, startRow = 1)
+writeData(wb, 1, "HOA Effect in Females", startCol = 8, startRow = 1)
+writeData(wb, 1, "HOA Effect in Males", startCol = 14, startRow = 1)
+writeData(wb, 1, "HOA > Female Interaction", startCol = 20, startRow = 1)
+
+# Merge cells
+mergeCells(wb, 1, cols = 2:7, rows = 1)
+mergeCells(wb, 1, cols = 8:13, rows = 1)
+mergeCells(wb, 1, cols = 14:19, rows = 1)
+mergeCells(wb, 1, cols = 20:25, rows = 1)
+
+# Write header row 2
+col_names <- c("Outcome",
+               "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
+               "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
+               "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
+               "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)")
+writeData(wb, 1, t(col_names), startRow = 2, colNames = FALSE)
+
+# Format data for writing
+data_to_write <- final_output %>%
+  mutate(
+    # Format p-values and q_BH in scientific notation
+    p_Controls = ifelse(!is.na(p_Controls), sprintf("%.3E", p_Controls), NA),
+    p_HOA_Females = ifelse(!is.na(p_HOA_Females), sprintf("%.3E", p_HOA_Females), NA),
+    p_HOA_Males = ifelse(!is.na(p_HOA_Males), sprintf("%.3E", p_HOA_Males), NA),
+    p_Interaction = ifelse(!is.na(p_Interaction), sprintf("%.3E", p_Interaction), NA),
+    q_BH_Controls = ifelse(!is.na(q_BH_Controls), sprintf("%.3E", q_BH_Controls), NA),
+    q_BH_HOA_Females = ifelse(!is.na(q_BH_HOA_Females), sprintf("%.3E", q_BH_HOA_Females), NA),
+    q_BH_HOA_Males = ifelse(!is.na(q_BH_HOA_Males), sprintf("%.3E", q_BH_HOA_Males), NA),
+    q_BH_Interaction = ifelse(!is.na(q_BH_Interaction), sprintf("%.3E", q_BH_Interaction), NA),
+    # Round other numeric columns to 2 decimals
+    across(c(Beta_pp_Controls, CI_low_Controls, CI_high_Controls,
+             Beta_pp_HOA_Females, CI_low_HOA_Females, CI_high_HOA_Females,
+             Beta_pp_HOA_Males, CI_low_HOA_Males, CI_high_HOA_Males,
+             Beta_pp_Interaction, CI_low_Interaction, CI_high_Interaction), 
+           ~round(., 2))
+  )
+
+# Write data
+writeData(wb, 1, data_to_write, startRow = 3, colNames = FALSE)
+
+# Style headers
+headerStyle <- createStyle(
+  fontColour = "black",
+  fgFill = "#D3D3D3",
+  halign = "center",
+  valign = "center",
+  textDecoration = "bold",
+  border = "TopBottomLeftRight"
+)
+
+addStyle(wb, 1, headerStyle, rows = 1:2, cols = 1:25, gridExpand = TRUE)
+
+# Save
+saveWorkbook(wb, 
+            "~/Desktop/Lab_Streeter_new/EpicCosmicData/Latest/HOA_Pooled_IVW_CI_Based.xlsx",
+             overwrite = TRUE)
+
+print("Analysis complete using CI-derived standard errors!")
+print(paste("Number of outcomes:", nrow(final_output)))
+
+
+
+```

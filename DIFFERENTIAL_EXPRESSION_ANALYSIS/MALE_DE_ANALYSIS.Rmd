@@ -1,0 +1,246 @@
+---
+title: "FEMALE_DE_ANALYSIS"
+output: html_document
+date: "2026-01-23"
+---
+
+```{r setup, include=FALSE}
+############################################################
+## DIFFERENTIAL EXPRESSION ANALYSIS: FEMALE ITS2 DATA
+## Comparing WT vs REV, REV vs RRAC, WT vs RRAC
+############################################################
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(ggVennDiagram)
+  library(gridExtra)
+  library(grid)
+})
+
+############################################################
+## 1. SETUP PATHS AND OUTPUT DIRECTORY
+############################################################
+
+# Input paths
+male_its2_path <- "~/Desktop/Lab_Streeter_new/Male/ITS2.csv"
+
+male_paths <- list(
+  CONTROL = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/Control_filtered_feature_bc_matrix.h5",
+  REVERSA = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/Reversa_filtered_feature_bc_matrix.h5",
+  REVREV  = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/Reversed_Reversa_filtered_feature_bc_matrix.h5",
+  RRAC226 = "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/RR_AC226_filtered_feature_bc_matrix.h5"
+)
+
+
+# Output directory
+output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/DE_ANALYSIS/MALE_ITS2_DE_RESULTS"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+cat("Output directory:", output_dir, "\n\n")
+
+############################################################
+## 2. HELPER FUNCTIONS
+clean_barcode <- function(bc) {
+  bc <- sub("^.*_", "", bc)
+  bc <- sub("-\\d+$", "", bc)
+  bc
+}
+
+clean_slice_id <- function(x) {
+  x <- trimws(x)
+  x <- sub("\\s+ITS$", "", x)
+  x
+}
+##############################################################
+cat("Loading MALE 10X data...\n")
+
+male_objs <- lapply(names(male_paths), function(nm) {
+
+  counts <- Read10X_h5(male_paths[[nm]])
+  obj <- CreateSeuratObject(counts, project = nm)
+
+  obj$sex <- "Male"
+  obj$sample <- nm
+
+  obj$barcode_clean <- clean_barcode(colnames(obj))
+  obj$barcode_id <- paste("Male", nm, obj$barcode_clean, sep="_")
+
+  obj
+})
+
+male <- merge(
+  male_objs[[1]],
+  y = male_objs[-1],
+  add.cell.ids = names(male_paths),
+  project = "Male"
+)
+
+male[["RNA"]] <- JoinLayers(male[["RNA"]])
+
+####################################################
+cat("Loading Male ITS2 mapping...\n")
+
+male_its <- read.csv(male_its2_path, stringsAsFactors = FALSE)
+male_its$slice_id <- clean_slice_id(male_its$ITS2)
+
+male_slice_treatment <- data.frame(
+   slice_id = c(
+    "314A", "321A", "321B",
+    "45-4A", "45-4B",
+    "49-1A", "49-1B",
+    "45-1A", "45-1B", "45-1C", "45-1D", "45-2A", "45-2B", "45-2C"
+  ),
+  sample_label = c(
+    rep("CONTROL", 3),
+    rep("REVERSA", 2),
+    rep("REVREV", 2),
+    rep("RRAC226", 7)
+  ),
+  stringsAsFactors = FALSE
+)
+
+male_slice_treatment$slice_id <- clean_slice_id(male_slice_treatment$slice_id)
+
+male_its$sample_label <- male_slice_treatment$sample_label[
+  match(male_its$slice_id, male_slice_treatment$slice_id)
+]
+
+male_its <- male_its %>% filter(!is.na(sample_label))
+
+male_its$barcode_clean <- clean_barcode(male_its$Barcode)
+
+male_its$barcode_id <- paste(
+  "Male",
+  male_its$sample_label,
+  male_its$barcode_clean,
+  sep = "_"
+)
+
+male$slice_id <- male_its$slice_id[
+  match(male$barcode_id, male_its$barcode_id)
+]
+
+cat("Cells with slice_id:", sum(!is.na(male$slice_id)), "\n")
+
+##################################################################
+selected_slices <- male_slice_treatment$slice_id
+
+male_filtered <- subset(male, subset = slice_id %in% selected_slices)
+
+male_filtered$treatment_group <- male_slice_treatment$sample_label[
+  match(male_filtered$slice_id, male_slice_treatment$slice_id)
+]
+
+table(male_filtered$treatment_group)
+#####################################################################
+male_filtered <- NormalizeData(male_filtered)
+male_filtered <- FindVariableFeatures(male_filtered)
+male_filtered <- ScaleData(male_filtered)
+
+Idents(male_filtered) <- "treatment_group"
+#####################################################################
+
+de_wt_vs_rev <- FindMarkers(
+  male_filtered,
+  ident.1 = "REVERSA",
+  ident.2 = "CONTROL",
+  min.pct = 0.1,
+  logfc.threshold = 0.25
+)
+
+de_wt_vs_rev$gene <- rownames(de_wt_vs_rev)
+
+de_wt_vs_revrev <- FindMarkers(
+  male_filtered,
+  ident.1 = "REVREV",
+  ident.2 = "CONTROL",
+  min.pct = 0.1,
+  logfc.threshold = 0.25
+)
+
+de_wt_vs_revrev$gene <- rownames(de_wt_vs_revrev)
+
+de_wt_vs_rrac <- FindMarkers(
+  male_filtered,
+  ident.1 = "RRAC226",
+  ident.2 = "CONTROL",
+  min.pct = 0.1,
+  logfc.threshold = 0.25
+)
+
+de_wt_vs_rrac$gene <- rownames(de_wt_vs_rrac)
+
+
+############################################################
+plot_volcano <- function(de, title) {
+
+  padj_cutoff <- 0.05
+  fc_cutoff <- 0.5
+
+  de$diffexpressed <- "NO"
+  de$diffexpressed[de$avg_log2FC > fc_cutoff & de$p_val_adj < padj_cutoff] <- "UP"
+  de$diffexpressed[de$avg_log2FC < -fc_cutoff & de$p_val_adj < padj_cutoff] <- "DOWN"
+
+  de$delabel <- NA
+
+  top_up <- de %>% filter(diffexpressed=="UP") %>%
+    arrange(p_val_adj) %>% head(20) %>% pull(gene)
+
+  top_down <- de %>% filter(diffexpressed=="DOWN") %>%
+    arrange(p_val_adj) %>% head(20) %>% pull(gene)
+
+  de$delabel[de$gene %in% c(top_up,top_down)] <- de$gene
+
+  ggplot(de, aes(avg_log2FC, -log10(p_val_adj),
+                 color=diffexpressed,label=delabel)) +
+    geom_point(alpha=0.6) +
+    geom_text_repel(size=3,max.overlaps=20) +
+    theme_minimal() +
+    labs(title=title)
+}
+
+p1 <- plot_volcano(de_wt_vs_rev,"WT vs REVERSA")
+p2 <- plot_volcano(de_wt_vs_revrev,"WT vs REVREV")
+p3 <- plot_volcano(de_wt_vs_rrac,"WT vs RRAC226")
+##############################################################
+
+up_wt_vs_rev <- de_wt_vs_rev %>%
+  filter(avg_log2FC < -0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+up_wt_vs_revrev <- de_wt_vs_revrev %>%
+  filter(avg_log2FC < -0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+up_wt_vs_rrac <- de_wt_vs_rrac %>%
+  filter(avg_log2FC < -0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+ggVennDiagram(
+  list(
+    "WT vs REV" = up_wt_vs_rev,
+    "WT vs REVREV" = up_wt_vs_revrev,
+    "WT vs RRAC226" = up_wt_vs_rrac
+  ),
+  label="count"
+)
+
+down_wt_vs_rev <- de_wt_vs_rev %>%
+  filter(avg_log2FC > 0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+down_wt_vs_revrev <- de_wt_vs_revrev %>%
+  filter(avg_log2FC > 0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+down_wt_vs_rrac <- de_wt_vs_rrac %>%
+  filter(avg_log2FC > 0.5 & p_val_adj < 0.05) %>% pull(gene)
+
+ggVennDiagram(
+  list(
+    "WT vs REV" = down_wt_vs_rev,
+    "WT vs REVREV" = down_wt_vs_revrev,
+    "WT vs RRAC226" = down_wt_vs_rrac
+  ),
+  label="count"
+)
+
+```

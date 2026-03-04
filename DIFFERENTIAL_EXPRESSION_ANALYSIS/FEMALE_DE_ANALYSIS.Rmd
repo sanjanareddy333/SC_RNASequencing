@@ -35,7 +35,7 @@ female_paths <- list(
 )
 
 # Output directory
-output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/FEMALE_ITS2_DE_RESULTS"
+output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/DE_ANALYSIS/FEMALE_ITS2_DE_RESULTS"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 cat("Output directory:", output_dir, "\n\n")
@@ -56,37 +56,32 @@ clean_slice_id <- function(x) {
   x
 }
 
-# Format gene list for display in boxes
-format_gene_box <- function(genes, title, max_genes = 50) {
-  n_genes <- length(genes)
-  if (n_genes == 0) {
-    return(paste0(title, " (n=0):\n  No genes\n"))
-  }
-  
-  genes_to_show <- head(genes, max_genes)
-  gene_text <- paste0("  ", genes_to_show, collapse="\n")
-  
-  if (n_genes > max_genes) {
-    gene_text <- paste0(gene_text, "\n  ... and ", n_genes - max_genes, " more")
-  }
-  
-  paste0(title, " (n=", n_genes, "):\n", gene_text, "\n")
+############################################################
+## GENE FILTERING FUNCTION
+############################################################
+
+get_genes_to_exclude <- function(all_genes) {
+
+  ## Explicit gene list
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+
+  ## Pattern-based exclusion
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes)
+  ]
+
+  return(unique(exclude_genes))
 }
 
-# Format gene list with numbered entries for boxes
-format_gene_list_numbered <- function(genes, max_genes = 10) {
-  n_genes <- length(genes)
-  if (n_genes == 0) return("No genes")
-  
-  genes_to_show <- head(genes, max_genes)
-  gene_lines <- paste0(seq_along(genes_to_show), ". ", genes_to_show)
-  
-  if (n_genes > max_genes) {
-    gene_lines <- c(gene_lines, paste0("... (", n_genes - max_genes, " more)"))
-  }
-  
-  paste(gene_lines, collapse = "\n")
-}
 
 # Volcano plot function with clear left/right labeling
 plot_volcano <- function(de_results, comparison_name, right_group_name, left_group_name, padj_cutoff = 0.05, fc_cutoff = 0.5) {
@@ -194,27 +189,6 @@ print(table(female$sample))
 cat("\n")
 
 
-
-get_genes_to_exclude <- function(all_genes) {
-  ## Explicit gene list
-  exclude_exact <- c(
-    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
-    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
-    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
-    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
-    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
-    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
-    "Nppa","Nppb"
-  )
-  
-  ## Find genes matching exclusion criteria
-  exclude_genes <- all_genes[
-    all_genes %in% exclude_exact |
-    grepl("^Hbb", all_genes) 
-  ]
-  
-  return(unique(exclude_genes))
-}
 
 
 ############################################################
@@ -358,6 +332,28 @@ write.csv(
   row.names = FALSE
 )
 cat("✓ Saved: Female_ITS2_Filtered_Metadata.csv\n\n")
+
+
+############################################################
+## APPLY GENE FILTERING (CORRECT OBJECT)
+############################################################
+
+cat("Applying gene filtering...\n")
+
+all_genes <- rownames(female_filtered)
+
+genes_to_exclude <- get_genes_to_exclude(all_genes)
+
+cat("Genes before filtering:", length(all_genes), "\n")
+cat("Genes to exclude:", length(genes_to_exclude), "\n")
+
+female_filtered <- subset(
+  female_filtered,
+  features = setdiff(all_genes, genes_to_exclude)
+)
+
+cat("Genes after filtering:", nrow(female_filtered), "\n\n")
+
 
 ############################################################
 ## 6. NORMALIZE AND SCALE
@@ -675,7 +671,7 @@ cat("All three overlap:", length(A_B_C), "\n\n")
 
 # Save each region
 write.csv(data.frame(gene = A_only),
-          file.path(output_dir, "Healthy_WT_only_39genes.csv"),
+          file.path(output_dir, "Healthy_WT_only_37genes.csv"),
           row.names = FALSE)
 
 write.csv(data.frame(gene = B_only),
@@ -683,11 +679,11 @@ write.csv(data.frame(gene = B_only),
           row.names = FALSE)
 
 write.csv(data.frame(gene = C_only),
-          file.path(output_dir, "Healthy_RRAC_vs_REV_only_33genes.csv"),
+          file.path(output_dir, "Healthy_RRAC_vs_REV_only_32genes.csv"),
           row.names = FALSE)
 
 write.csv(data.frame(gene = A_C),
-          file.path(output_dir, "Healthy_WT_and_RRAC_vs_WT_7genes.csv"),
+          file.path(output_dir, "Healthy_WT_and_RRAC_vs_WT_8genes.csv"),
           row.names = FALSE)
 
 write.csv(data.frame(gene = B_C),
@@ -699,10 +695,10 @@ write.csv(data.frame(gene = A_B_C),
           row.names = FALSE)
 
 cat("✓ Saved healthy gene lists:\n")
-cat("  - Healthy_WT_only_39genes.csv\n")
+cat("  - Healthy_WT_only_37genes.csv\n")
 cat("  - Healthy_RRAC_vs_WT_only_41genes.csv\n")
-cat("  - Healthy_RRAC_vs_REV_only_33genes.csv\n")
-cat("  - Healthy_WT_and_RRAC_vs_WT_7genes.csv\n")
+cat("  - Healthy_RRAC_vs_REV_only_32genes.csv\n")
+cat("  - Healthy_WT_and_RRAC_vs_WT_8genes.csv\n")
 cat("  - Healthy_RRAC_vs_WT_and_RRAC_vs_REV_10genes.csv\n")
 cat("  - Healthy_All_Three_Overlap_0genes.csv\n")
 
@@ -748,7 +744,7 @@ cat("Overlap (Both):", length(disease_overlap_genes), "\n\n")
 # Save to CSV
 write.csv(
   data.frame(gene = high_chol_only_genes),
-  file.path(output_dir, "Disease_HighCholesterol_only_65genes.csv"),
+  file.path(output_dir, "Disease_HighCholesterol_only_64genes.csv"),
   row.names = FALSE
 )
 
@@ -760,14 +756,14 @@ write.csv(
 
 write.csv(
   data.frame(gene = inflammation_only_genes),
-  file.path(output_dir, "Disease_Inflammation_only_33genes.csv"),
+  file.path(output_dir, "Disease_Inflammation_only_31genes.csv"),
   row.names = FALSE
 )
 
 cat("✓ Saved disease gene lists:\n")
-cat("  - Disease_HighCholesterol_only_65genes.csv\n")
+cat("  - Disease_HighCholesterol_only_64genes.csv\n")
 cat("  - Disease_Overlap_Both_13genes.csv\n")
-cat("  - Disease_Inflammation_only_33genes.csv\n")
+cat("  - Disease_Inflammation_only_31genes.csv\n")
 
 ############################################################
 ## 15. SAVE DISEASE VENN GENE LISTS TO CSV

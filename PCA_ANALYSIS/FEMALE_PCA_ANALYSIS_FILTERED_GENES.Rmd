@@ -257,6 +257,7 @@ female <- merge(
   add.cell.ids = names(female_paths),
   project = "Female"
 )
+cat("Merged object:", ncol(female), "spots,", nrow(female), "genes\n")
 
 ## Seurat v5 layer join
 female[["RNA"]] <- JoinLayers(female[["RNA"]])

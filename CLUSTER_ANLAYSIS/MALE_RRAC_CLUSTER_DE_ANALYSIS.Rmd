@@ -1,0 +1,389 @@
+---
+title: "RRAC_CLUSTER_ANALYSIS"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(Matrix)
+  library(ggrepel)
+  library(EnhancedVolcano)
+})
+```
+
+## Analysis Overview
+
+Comparing differential gene expression between two groups of RRAC226 slices:
+- **Group 1 (45-1)**: 45-1A, 45-1B, 45-1C, 45-1D
+- **Group 2 (45-2)**: 45-2A, 45-2B, 45-2C
+
+```{r paths}
+############################################################
+## PATHS
+############################################################
+
+root_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/RRAC226_DE_ANALYSIS"
+dir.create(root_dir, showWarnings = FALSE, recursive = TRUE)
+
+# RRAC226 data path
+rrac226_path <- "/Users/preddy/Desktop/Lab_Streeter/Sanjana/Male_DataSet/data/RR_AC226_filtered_feature_bc_matrix.h5"
+
+# ITS2 mapping
+male_its2_path <- "~/Desktop/Lab_Streeter_new/DATA/MALE/ITS2.csv"
+
+cat("Saving results to:", root_dir, "\n\n")
+```
+
+## Helper Functions
+
+```{r helper-functions}
+# Clean barcode format
+clean_barcode <- function(bc) {
+  bc <- sub("^.*_", "", bc)
+  bc <- sub("-\\d+$", "", bc)
+  bc
+}
+
+# Clean slice ID
+clean_slice_id <- function(x) {
+  x <- trimws(x)
+  x <- sub("\\s+ITS$", "", x)
+  x
+}
+
+# Get genes to exclude (cardiac, RBC, mitochondrial)
+get_genes_to_exclude <- function(all_genes) {
+  exclude_exact <- c(
+    "Myl2","Tnni3","Actc1","Fabp3","Cox8b","Cox6a2","mt-Nd5",
+    "Atp2a2","mt-Nd4l","Pln","Tnnc1","Myl3","Csrp3","Ech1",
+    "Atp5a1","Cryab","Ckm","Atp5o","Atp5b","Ldhb","Tnnt2",
+    "Mdh1","Ogdh","Eno3","Alas2","Epb41","Fech",
+    "Hba-a1","Hba-a2","Myh7","Mybpc3","Tcap","Cmya5","Myoz2",
+    "Xirp2","Ankrd1","Fhl2","Scn5a","Kcnip2","Sln","Fxyd6",
+    "Nppa","Nppb"
+  )
+  
+  exclude_genes <- all_genes[
+    all_genes %in% exclude_exact |
+    grepl("^Hbb", all_genes) 
+  ]
+  
+  return(unique(exclude_genes))
+}
+```
+
+## 1. Load RRAC226 Data
+
+```{r load-data}
+cat("Loading RRAC226 data...\n")
+
+# Load 10x data
+counts <- Read10X_h5(rrac226_path)
+
+# Create Seurat object
+rrac226 <- CreateSeuratObject(
+  counts = counts,
+  project = "RRAC226"
+)
+
+rrac226$sample <- "RRAC226"
+rrac226$sex <- "Male"
+
+# Add cleaned barcode
+rrac226$barcode_clean <- clean_barcode(colnames(rrac226))
+rrac226$barcode_id <- paste(rrac226$sex, rrac226$sample, rrac226$barcode_clean, sep = "_")
+
+cat("Loaded:", ncol(rrac226), "spots,", nrow(rrac226), "genes\n")
+
+# Join layers for Seurat v5
+if (inherits(rrac226[["RNA"]], "Assay5")) {
+  rrac226[["RNA"]] <- JoinLayers(rrac226[["RNA"]])
+}
+```
+
+## 2. Filter Genes
+
+```{r filter-genes}
+cat("\n=== FILTERING GENES ===\n")
+genes_before <- nrow(rrac226)
+cat("Total genes before filtering:", genes_before, "\n")
+
+all_genes <- rownames(rrac226)
+genes_to_exclude <- get_genes_to_exclude(all_genes)
+
+cat("Genes to exclude:", length(genes_to_exclude), "\n")
+
+genes_to_keep <- setdiff(all_genes, genes_to_exclude)
+cat("Genes to keep:", length(genes_to_keep), "\n")
+
+# Remove excluded genes
+rrac226 <- subset(rrac226, features = genes_to_keep)
+
+genes_after <- nrow(rrac226)
+cat("Total genes after filtering:", genes_after, "\n")
+cat("Genes removed:", genes_before - genes_after, "\n")
+cat("=== GENE FILTERING COMPLETE ===\n\n")
+```
+
+## 3. Map Slices using ITS2
+
+```{r its2-mapping}
+cat("Loading ITS2 mapping...\n")
+
+# Load ITS2
+male_its <- read.csv(male_its2_path, stringsAsFactors = FALSE)
+male_its$slice_id <- clean_slice_id(male_its$ITS2)
+
+# Define RRAC226 slices
+rrac226_slices <- data.frame(
+  slice_id = c("45-1A", "45-1B", "45-1C", "45-1D", "45-2A", "45-2B", "45-2C"),
+  slice_group = c(
+    rep("Group1_45-1", 4),
+    rep("Group2_45-2", 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Clean slice IDs
+rrac226_slices$slice_id_clean <- clean_slice_id(rrac226_slices$slice_id)
+
+# Filter ITS2 to only RRAC226 slices
+male_its_rrac <- male_its %>%
+  filter(slice_id %in% rrac226_slices$slice_id_clean)
+
+# Add group labels
+male_its_rrac$slice_group <- rrac226_slices$slice_group[
+  match(male_its_rrac$slice_id, rrac226_slices$slice_id_clean)
+]
+
+# Clean barcodes
+male_its_rrac$barcode_clean <- clean_barcode(male_its_rrac$Barcode)
+
+# Create barcode_id for matching
+male_its_rrac$barcode_id <- paste(
+  "Male",
+  "RRAC226",
+  male_its_rrac$barcode_clean,
+  sep = "_"
+)
+
+cat("RRAC226 ITS2 barcodes:", nrow(male_its_rrac), "\n")
+
+# Map to Seurat object
+rrac226$slice_id <- male_its_rrac$slice_id[
+  match(rrac226$barcode_id, male_its_rrac$barcode_id)
+]
+
+rrac226$slice_group <- male_its_rrac$slice_group[
+  match(rrac226$barcode_id, male_its_rrac$barcode_id)
+]
+
+# Filter to only spots with slice assignments
+rrac226_filtered <- subset(rrac226, subset = !is.na(slice_group))
+
+cat("\nSpots with slice assignments:", ncol(rrac226_filtered), "\n")
+
+# Check group sizes
+cat("\nGroup sizes:\n")
+print(table(rrac226_filtered$slice_group, useNA = "ifany"))
+
+cat("\nSlice distribution:\n")
+print(table(rrac226_filtered$slice_id, rrac226_filtered$slice_group))
+```
+
+## 4. Process and Normalize
+
+```{r normalize}
+cat("\nNormalizing data...\n")
+
+# Normalize
+rrac226_filtered <- NormalizeData(rrac226_filtered)
+
+# Scale (optional, but helps with visualization)
+rrac226_filtered <- ScaleData(rrac226_filtered)
+
+cat("Processing complete!\n")
+```
+
+## 5. Differential Expression Analysis
+
+```{r differential-expression}
+cat("\n=== DIFFERENTIAL EXPRESSION ANALYSIS ===\n")
+cat("Comparing: Group1_45-1 (n=4 slices) vs Group2_45-2 (n=3 slices)\n\n")
+
+# Set identity to slice_group
+Idents(rrac226_filtered) <- "slice_group"
+
+# Perform differential expression
+# Group1_45-1 vs Group2_45-2
+de_results <- FindMarkers(
+  rrac226_filtered,
+  ident.1 = "Group1_45-1",
+  ident.2 = "Group2_45-2",
+  test.use = "wilcox",
+  logfc.threshold = 0,
+  min.pct = 0.1,
+  verbose = TRUE
+)
+
+cat("\nDifferential expression complete!\n")
+cat("Total genes tested:", nrow(de_results), "\n")
+
+# Add gene names as a column
+de_results$gene <- rownames(de_results)
+
+# Reorder columns
+de_results <- de_results %>%
+  select(gene, everything())
+
+# Add significance labels
+de_results$significance <- "NS"
+de_results$significance[de_results$p_val_adj < 0.05 & de_results$avg_log2FC > 0.5] <- "Up in Group1 (45-1)"
+de_results$significance[de_results$p_val_adj < 0.05 & de_results$avg_log2FC < -0.5] <- "Up in Group2 (45-2)"
+
+# Summary
+cat("\nSignificant genes (FDR < 0.05, |log2FC| > 0.5):\n")
+print(table(de_results$significance))
+
+# Top upregulated in Group1 (45-1)
+cat("\nTop 10 genes upregulated in Group1 (45-1):\n")
+top_group1 <- de_results %>%
+  filter(avg_log2FC > 0) %>%
+  arrange(p_val_adj, desc(avg_log2FC)) %>%
+  head(10) %>%
+  select(gene, avg_log2FC, p_val, p_val_adj)
+print(top_group1)
+
+write.csv(
+  top_group1,
+  file.path(root_dir, "RRAC226_Group1_45-1_UPREGULATED.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# Top upregulated in Group2 (45-2)
+cat("\nTop 10 genes upregulated in Group2 (45-2):\n")
+top_group2 <- de_results %>%
+  filter(avg_log2FC < 0) %>%
+  arrange(p_val_adj, avg_log2FC) %>%
+  head(10) %>%
+  select(gene, avg_log2FC, p_val, p_val_adj)
+print(top_group2)
+
+
+write.csv(
+  top_group2,
+  file.path(root_dir, "RRAC226_Group2_45-2_UPREGULATED.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+```
+
+## 6. Save Results
+
+```{r save-results}
+# Save full results
+output_file <- file.path(root_dir, "DE_Results_Group1_45-1_vs_Group2_45-2.csv")
+write.csv(de_results, output_file, row.names = FALSE, quote = FALSE)
+
+cat("\n✓ Saved full DE results to:", output_file, "\n")
+
+# Save significant genes only
+sig_genes <- de_results %>%
+  filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.5)
+
+sig_output_file <- file.path(root_dir, "DE_Results_Significant_Genes.csv")
+write.csv(sig_genes, sig_output_file, row.names = FALSE, quote = FALSE)
+
+cat("✓ Saved significant genes to:", sig_output_file, "\n")
+cat("  Total significant genes:", nrow(sig_genes), "\n")
+```
+
+## 7. Volcano Plot
+
+```{r volcano-plot, fig.width=10, fig.height=8}
+cat("\nGenerating volcano plot...\n")
+
+# Prepare data for volcano plot
+volcano_data <- de_results %>%
+  mutate(
+    neg_log10_pval = -log10(p_val_adj),
+    label = ifelse(
+      p_val_adj < 0.01 & abs(avg_log2FC) > 1,
+      gene,
+      ""
+    )
+  )
+
+# Create volcano plot
+p_volcano <- ggplot(
+  volcano_data,
+  aes(x = avg_log2FC, y = neg_log10_pval, color = significance)
+) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey30") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "grey30") +
+  geom_text_repel(
+    aes(label = label),
+    size = 3,
+    max.overlaps = 20,
+    box.padding = 0.5,
+    point.padding = 0.3,
+    segment.size = 0.2,
+    color = "black"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Up in Group1 (45-1)" = "#d62728",  # red
+      "Up in Group2 (45-2)" = "#2ca02c",  # green
+      "NS" = "grey70"
+    ),
+    name = "Significance"
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Differential Expression: Group1 (45-1) vs Group2 (45-2)",
+    subtitle = paste0(
+      "RRAC226 slices | ",
+      sum(de_results$significance == "Up in Group1 (45-1)"), " genes up in Group1, ",
+      sum(de_results$significance == "Up in Group2 (45-2)"), " genes up in Group2"
+    ),
+    x = "log2 Fold Change (Group1 vs Group2)",
+    y = "-log10(FDR-adjusted p-value)"
+  ) +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_line(color = "grey90"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_volcano)
+
+# Save volcano plot
+volcano_file <- file.path(root_dir, "Volcano_Plot_Group1_vs_Group2.png")
+ggsave(volcano_file, p_volcano, width = 10, height = 8, dpi = 300)
+
+cat("✓ Saved volcano plot to:", volcano_file, "\n")
+```
+
+
+## 8. Summary Statistics
+
+```{r summary}
+cat("\n=== ANALYSIS SUMMARY ===\n")
+cat("Total spots analyzed:", ncol(rrac226_filtered), "\n")
+cat("  Group1 (45-1):", sum(rrac226_filtered$slice_group == "Group1_45-1"), "spots\n")
+cat("  Group2 (45-2):", sum(rrac226_filtered$slice_group == "Group2_45-2"), "spots\n")
+cat("\nTotal genes tested:", nrow(de_results), "\n")
+cat("Significant genes (FDR < 0.05, |log2FC| > 0.5):", nrow(sig_genes), "\n")
+cat("  Up in Group1:", sum(de_results$significance == "Up in Group1 (45-1)"), "\n")
+cat("  Up in Group2:", sum(de_results$significance == "Up in Group2 (45-2)"), "\n")
+cat("\nAll results saved to:", root_dir, "\n")
+cat("========================\n")
+```
