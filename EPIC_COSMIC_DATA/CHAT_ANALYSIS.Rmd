@@ -2,8 +2,7 @@
 title: "CHAT_ANALYSIS"
 output: html_document
 ---
-
-```{rsetup }
+```{r setup}
 library(dplyr)
 library(tidyr)
 library(readxl)
@@ -36,9 +35,6 @@ df <- df %>%
 # 3️⃣ Separate prevalence and CI rows
 prev_df <- df %>%
   filter(!str_detect(Group_Info, "95% CI"))
-
-colnames(prev_df)
-
 
 ci_df <- df %>%
   filter(str_detect(Group_Info, "95% CI")) %>%
@@ -89,6 +85,35 @@ long <- prev_long %>%
     SE = CI_halfwidth / 1.96
   )
 
+# 🔹 Extract Combined rows (sex not specified)
+combined_long <- prev_long %>%
+  filter(str_detect(Group_Info, "Combined")) %>%
+  mutate(
+    Group = case_when(
+      str_detect(Group_Info, "^HOA") ~ "HOA",
+      str_detect(Group_Info, "^Normal") ~ "Normal"
+    ),
+    Age = str_extract(Group_Info, "\\d+-\\d+|80\\+")
+  ) %>%
+  left_join(
+    ci_long %>%
+      filter(str_detect(Group_Info, "Combined")) %>%
+      select(Group, Age, Outcome, CI),
+    by = c("Group", "Age", "Outcome")
+  ) %>%
+  mutate(
+    CI_halfwidth = ifelse(CI < 1, CI * 100, CI),
+    SE = CI_halfwidth / 1.96
+  )
+
+hc <- combined_long %>%
+  filter(Group=="HOA") %>%
+  rename(Prev_hc=Prev, SE_hc=SE)
+
+nc <- combined_long %>%
+  filter(Group=="Normal") %>%
+  rename(Prev_nc=Prev, SE_nc=SE)
+
 # 7️⃣ Split strata for contrasts
 hm <- long %>% filter(Group=="HOA", Sex=="Male") %>% 
   rename(Prev_hm=Prev, SE_hm=SE)
@@ -104,6 +129,13 @@ joined <- hm %>%
   full_join(cm, by=c("Age","Outcome")) %>%
   full_join(hf, by=c("Age","Outcome")) %>%
   full_join(cf, by=c("Age","Outcome"))
+
+combined_per_age <- hc %>%
+  full_join(nc, by=c("Age","Outcome")) %>%
+  mutate(
+    HOA_Combined = Prev_hc - Prev_nc,
+    se_HOA_Combined = sqrt(SE_hc^2 + SE_nc^2)
+  )
 
 # 9️⃣ Calculate per-age contrasts
 per_age <- joined %>%
@@ -154,6 +186,17 @@ res <- per_age %>%
   }) %>%
   ungroup()
 
+# Add Combined analysis
+combined_res <- combined_per_age %>%
+  group_by(Outcome) %>%
+  group_modify(~{
+    ivw_pool(.x$HOA_Combined, .x$se_HOA_Combined) %>%
+      mutate(Effect="HOA_Combined")
+  }) %>%
+  ungroup()
+
+res <- bind_rows(res, combined_res)
+
 # 1️⃣2️⃣ BH correction
 res <- res %>%
   group_by(Effect) %>%
@@ -170,7 +213,8 @@ final_output <- res %>%
   ) %>%
   # Filter out completely empty rows
   filter(!is.na(Beta_pp_Controls) | !is.na(Beta_pp_HOA_Females) | 
-         !is.na(Beta_pp_HOA_Males) | !is.na(Beta_pp_Interaction)) %>%
+         !is.na(Beta_pp_HOA_Males) | !is.na(Beta_pp_Interaction) |
+  !is.na(Beta_pp_HOA_Combined)) %>%
   # Reorder columns
   select(
     Outcome,
@@ -181,7 +225,9 @@ final_output <- res %>%
     Age_bins_HOA_Males, Beta_pp_HOA_Males, CI_low_HOA_Males, CI_high_HOA_Males,
     p_HOA_Males, q_BH_HOA_Males,
     Age_bins_Interaction, Beta_pp_Interaction, CI_low_Interaction, CI_high_Interaction,
-    p_Interaction, q_BH_Interaction
+    p_Interaction, q_BH_Interaction,
+    Age_bins_HOA_Combined, Beta_pp_HOA_Combined, CI_low_HOA_Combined, CI_high_HOA_Combined,
+    p_HOA_Combined, q_BH_HOA_Combined
   )
 
 # 1️⃣4️⃣ Create Excel with formatted headers
@@ -194,43 +240,54 @@ writeData(wb, 1, "Female vs Male (Controls)", startCol = 2, startRow = 1)
 writeData(wb, 1, "HOA Effect in Females", startCol = 8, startRow = 1)
 writeData(wb, 1, "HOA Effect in Males", startCol = 14, startRow = 1)
 writeData(wb, 1, "HOA > Female Interaction", startCol = 20, startRow = 1)
+writeData(wb, 1, "HOA Combined (All Sexes)", startCol = 26, startRow = 1)
 
 # Merge cells
 mergeCells(wb, 1, cols = 2:7, rows = 1)
 mergeCells(wb, 1, cols = 8:13, rows = 1)
 mergeCells(wb, 1, cols = 14:19, rows = 1)
 mergeCells(wb, 1, cols = 20:25, rows = 1)
+mergeCells(wb, 1, cols = 26:31, rows = 1)
 
 # Write header row 2
 col_names <- c("Outcome",
                "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
                "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
                "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
+               "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)",
                "Age bins (n)", "β (pp)", "CI low", "CI high", "p", "q (BH)")
+
 writeData(wb, 1, t(col_names), startRow = 2, colNames = FALSE)
 
-# Format data for writing
+# Format data for writing - CONVERT TO STRINGS FIRST, THEN WRITE
 data_to_write <- final_output %>%
   mutate(
-    # Format p-values and q_BH in scientific notation
-    p_Controls = ifelse(!is.na(p_Controls), sprintf("%.3E", p_Controls), NA),
-    p_HOA_Females = ifelse(!is.na(p_HOA_Females), sprintf("%.3E", p_HOA_Females), NA),
-    p_HOA_Males = ifelse(!is.na(p_HOA_Males), sprintf("%.3E", p_HOA_Males), NA),
-    p_Interaction = ifelse(!is.na(p_Interaction), sprintf("%.3E", p_Interaction), NA),
-    q_BH_Controls = ifelse(!is.na(q_BH_Controls), sprintf("%.3E", q_BH_Controls), NA),
-    q_BH_HOA_Females = ifelse(!is.na(q_BH_HOA_Females), sprintf("%.3E", q_BH_HOA_Females), NA),
-    q_BH_HOA_Males = ifelse(!is.na(q_BH_HOA_Males), sprintf("%.3E", q_BH_HOA_Males), NA),
-    q_BH_Interaction = ifelse(!is.na(q_BH_Interaction), sprintf("%.3E", q_BH_Interaction), NA),
-    # Round other numeric columns to 2 decimals
+    # Round numeric columns to 2 decimals (keep as numeric for now)
     across(c(Beta_pp_Controls, CI_low_Controls, CI_high_Controls,
              Beta_pp_HOA_Females, CI_low_HOA_Females, CI_high_HOA_Females,
              Beta_pp_HOA_Males, CI_low_HOA_Males, CI_high_HOA_Males,
-             Beta_pp_Interaction, CI_low_Interaction, CI_high_Interaction), 
-           ~round(., 2))
+             Beta_pp_Interaction, CI_low_Interaction, CI_high_Interaction,
+             Beta_pp_HOA_Combined, CI_low_HOA_Combined, CI_high_HOA_Combined), 
+           ~round(., 2)),
+    
+    # Convert ALL p and q_BH values to character strings with scientific notation
+    across(c(p_Controls, p_HOA_Females, p_HOA_Males, p_Interaction, p_HOA_Combined,
+             q_BH_Controls, q_BH_HOA_Females, q_BH_HOA_Males, q_BH_Interaction, q_BH_HOA_Combined),
+           ~if_else(is.na(.), NA_character_, sprintf("%.3E", .)))
   )
 
 # Write data
 writeData(wb, 1, data_to_write, startRow = 3, colNames = FALSE)
+
+# Create text style for p and q(BH) columns
+textStyle <- createStyle(numFmt = "TEXT")
+
+# Apply text format to p and q(BH) columns (columns 5, 6, 11, 12, 17, 18, 23, 24, 29, 30)
+p_qBH_cols <- c(5, 6, 11, 12, 17, 18, 23, 24, 29, 30)
+for (col in p_qBH_cols) {
+  addStyle(wb, 1, textStyle, rows = 3:(3 + nrow(data_to_write) - 1), cols = col, 
+           gridExpand = TRUE, stack = TRUE)
+}
 
 # Style headers
 headerStyle <- createStyle(
@@ -242,16 +299,16 @@ headerStyle <- createStyle(
   border = "TopBottomLeftRight"
 )
 
-addStyle(wb, 1, headerStyle, rows = 1:2, cols = 1:25, gridExpand = TRUE)
+# Apply to ALL 31 columns
+addStyle(wb, 1, headerStyle, rows = 1:2, cols = 1:31, gridExpand = TRUE)
 
 # Save
 saveWorkbook(wb, 
-            "~/Desktop/Lab_Streeter_new/EpicCosmicData/Latest/HOA_Pooled_IVW_CI_Based.xlsx",
+             "~/Desktop/Lab_Streeter_new/EpicCosmicData/Latest/HOA_Pooled_IVW_CI_Based.xlsx",
              overwrite = TRUE)
 
 print("Analysis complete using CI-derived standard errors!")
 print(paste("Number of outcomes:", nrow(final_output)))
-
-
-
 ```
+
+
