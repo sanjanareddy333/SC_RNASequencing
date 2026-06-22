@@ -1,0 +1,203 @@
+---
+title: "6-22-2026-BULKRNA-Knockout-Validation"
+output: html_document
+---
+
+```{rsetup }
+## ============================================================
+## ko_validation_boxplots.R
+## Per-gene normalized-expression boxplots for KO validation
+## Genes: Opa1, Atf4, Fgf21   across OPA1 / ATF4 / AO models
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(ggrepel)
+  library(tidyr)
+  library(dplyr)
+})
+
+tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
+genes   <- c("Opa1", "Atf4", "Fgf21")
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/ko_validation_12_boxplots.png"
+
+## ---- 1. Load + normalize (CPM) ------------------------------------------
+raw <- read.delim(tsv, check.names = FALSE)
+rownames(raw) <- make.unique(raw$gene_name)
+cts <- as.matrix(raw[, !(colnames(raw) %in% c("gene_id", "gene_name"))])
+cpm <- sweep(cts, 2, colSums(cts), "/") * 1e6
+logcpm <- log2(cpm + 1)
+## (alt: DESeq2 median-of-ratios via counts(dds, normalized=TRUE) is also fine;
+##  CPM is used here so the figure is self-contained.)
+
+## ---- 2. Long table with metadata ----------------------------------------
+parts <- strsplit(colnames(cts), "_")
+meta <- data.frame(
+  sample   = colnames(cts),
+  genotype = vapply(parts, function(x) paste(x[1], x[2], sep = "_"), ""),
+  diet     = vapply(parts, `[`, "", 3),
+  id       = vapply(parts, `[`, "", 4)
+)
+
+dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
+dat$sample <- rownames(dat)
+dat <- dat |>
+  pivot_longer(all_of(genes), names_to = "gene", values_to = "logcpm") |>
+  left_join(meta, by = "sample")
+
+geno_lv <- c("OPA1_WT","OPA1_KO","ATF4_WT","ATF4_KO","AO_WT","AO_KO")
+dat$genotype <- factor(dat$genotype, levels = geno_lv)
+dat$diet     <- factor(dat$diet, levels = c("CD","HFD"))
+dat$gene     <- factor(dat$gene, levels = genes)
+
+## ---- 3. Shading: genotypes where each gene is expected LOW ---------------
+ko_low <- bind_rows(
+  data.frame(gene = "Opa1",  genotype = c("OPA1_KO","AO_KO")),
+  data.frame(gene = "Atf4",  genotype = c("ATF4_KO","AO_KO"))
+) |>
+  mutate(gene = factor(gene, levels = genes),
+         xpos = as.integer(factor(genotype, levels = geno_lv)),
+         xmin = xpos - 0.5, xmax = xpos + 0.5)
+
+## ---- 4. Plot ------------------------------------------------------------
+diet_col <- c(CD = "#4C72B0", HFD = "#DD8452")
+
+p <- ggplot(dat, aes(genotype, logcpm)) +
+  geom_rect(data = ko_low, inherit.aes = FALSE,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+            fill = "red", alpha = 0.06) +
+  geom_boxplot(aes(fill = diet), outlier.shape = NA,
+               position = position_dodge(width = 0.8),
+               width = 0.7, alpha = 0.45, color = "grey40") +
+  geom_point(aes(fill = diet),
+             position = position_jitterdodge(jitter.width = 0.18, dodge.width = 0.8,
+                                             seed = 1),
+             shape = 21, size = 2.4, color = "black", stroke = 0.4) +
+  geom_text_repel(aes(label = id, group = diet),
+                  position = position_jitterdodge(jitter.width = 0.18, dodge.width = 0.8,
+                                                  seed = 1),
+                  size = 2.4, color = "grey25", max.overlaps = Inf,
+                  segment.size = 0.2, min.segment.length = 0.3) +
+  facet_wrap(~ gene, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = diet_col) +
+  labs(x = NULL, y = "log2(CPM + 1)", fill = "diet",
+       title = "Knockout validation - per-gene normalized expression",
+       subtitle = "red shading = genotype where the gene is expected LOW") +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0),
+        strip.background = element_rect(fill = "grey92"))
+
+ggsave(out_png, p, width = 12, height = 13, dpi = 150)
+
+## ---- 5. Group-mean summary ----------------------------------------------
+summ <- dat |>
+  group_by(gene, genotype, diet) |>
+  summarise(mean = round(mean(logcpm), 2), n = n(), .groups = "drop") |>
+  arrange(gene, genotype, diet)
+print(as.data.frame(summ))
+
+
+
+
+## ============================================================
+## ko_validation_boxplots_pooled.R
+## Per-gene normalized-expression boxplots for KO validation
+## ONE box per genotype (CD + HFD pooled); points colored by diet
+## Genes: Opa1, Atf4, Fgf21   across OPA1 / ATF4 / AO models
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(ggrepel)
+  library(tidyr)
+  library(dplyr)
+})
+
+genes   <- c("Opa1", "Atf4", "Fgf21")
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/ko_validation_6_boxplots.png"
+
+## ---- 1. Load + normalize (CPM) ------------------------------------------
+raw <- read.delim(tsv, check.names = FALSE)
+rownames(raw) <- make.unique(raw$gene_name)
+cts <- as.matrix(raw[, !(colnames(raw) %in% c("gene_id", "gene_name"))])
+cpm <- sweep(cts, 2, colSums(cts), "/") * 1e6
+logcpm <- log2(cpm + 1)
+
+## ---- 2. Long table with metadata ----------------------------------------
+parts <- strsplit(colnames(cts), "_")
+meta <- data.frame(
+  sample   = colnames(cts),
+  genotype = vapply(parts, function(x) paste(x[1], x[2], sep = "_"), ""),
+  diet     = vapply(parts, `[`, "", 3),
+  id       = vapply(parts, `[`, "", 4)
+)
+
+dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
+dat$sample <- rownames(dat)
+dat <- dat |>
+  pivot_longer(all_of(genes), names_to = "gene", values_to = "logcpm") |>
+  left_join(meta, by = "sample")
+
+geno_lv <- c("OPA1_WT","OPA1_KO","ATF4_WT","ATF4_KO","AO_WT","AO_KO")
+dat$genotype <- factor(dat$genotype, levels = geno_lv)
+dat$diet     <- factor(dat$diet, levels = c("CD","HFD"))
+dat$gene     <- factor(dat$gene, levels = genes)
+
+## ---- 3. Shading: genotypes where each gene is expected LOW ---------------
+ko_low <- bind_rows(
+  data.frame(gene = "Opa1", genotype = c("OPA1_KO","AO_KO")),
+  data.frame(gene = "Atf4", genotype = c("ATF4_KO","AO_KO"))
+) |>
+  mutate(gene = factor(gene, levels = genes),
+         xpos = as.integer(factor(genotype, levels = geno_lv)),
+         xmin = xpos - 0.5, xmax = xpos + 0.5)
+
+## ---- 4. Plot: ONE box per genotype, points colored by diet --------------
+diet_col <- c(CD = "#4C72B0", HFD = "#DD8452")
+
+p <- ggplot(dat, aes(genotype, logcpm)) +
+  geom_rect(data = ko_low, inherit.aes = FALSE,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+            fill = "red", alpha = 0.06) +
+  geom_boxplot(outlier.shape = NA, width = 0.6,
+               fill = "#cfd8e3", alpha = 0.6, color = "grey40") +
+  geom_jitter(aes(fill = diet), width = 0.16, height = 0,
+              shape = 21, size = 2.5, color = "black", stroke = 0.4) +
+  geom_text_repel(aes(label = id), size = 2.4, color = "grey25",
+                  position = position_jitter(width = 0.16, height = 0, seed = 1),
+                  max.overlaps = Inf, segment.size = 0.2,
+                  min.segment.length = 0.3) +
+  facet_wrap(~ gene, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = diet_col, name = "diet (points)") +
+  labs(x = NULL, y = "log2(CPM + 1)",
+       title = "Knockout validation - per-gene normalized expression (diets pooled)",
+       subtitle = "red shading = genotype where the gene is expected LOW") +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0),
+        strip.background = element_rect(fill = "grey92"))
+
+ggsave(out_png, p, width = 11, height = 13, dpi = 150)
+
+## ---- 5. Group-mean summary (pooled) -------------------------------------
+summ <- dat |>
+  group_by(gene, genotype) |>
+  summarise(mean = round(mean(logcpm), 2), n = n(), .groups = "drop") |>
+  arrange(gene, genotype)
+print(as.data.frame(summ))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```

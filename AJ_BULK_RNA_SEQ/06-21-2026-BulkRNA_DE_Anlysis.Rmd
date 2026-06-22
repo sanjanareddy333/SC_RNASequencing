@@ -1,0 +1,181 @@
+---
+title: "06-21-2026-BulkRNA_DE_Anlysis"
+output: html_document
+---
+
+```{rsetup }
+# ================================
+# Bulk RNA-seq DE analysis
+# OPA1 KO vs WT, ATF4 KO vs WT, AO KO vs WT
+# ================================
+
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(EnhancedVolcano)
+
+# ----------------
+# 1. Load counts
+# ----------------
+counts_file <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
+
+counts_raw <- read.delim(counts_file, check.names = FALSE)
+
+# Save gene annotation separately
+gene_info <- counts_raw[, c("gene_id", "gene_name")]
+
+# Use unique gene_id as row names
+rownames(counts_raw) <- counts_raw$gene_id
+
+# Remove annotation columns
+counts <- counts_raw[, !(colnames(counts_raw) %in% c("gene_id", "gene_name"))]
+
+# Convert to numeric matrix and round for DESeq2
+counts <- round(as.matrix(counts))
+
+# Check
+dim(counts)
+head(counts[, 1:5])
+
+# ----------------
+# 2. Create metadata
+# ----------------
+samples <- colnames(counts)
+
+metadata <- data.frame(sample = samples) %>%
+  mutate(
+    model = case_when(
+      grepl("^O", sample) & !grepl("^AO", sample) ~ "OPA1",
+      grepl("^A", sample) & !grepl("^AO", sample) ~ "ATF4",
+      grepl("^AO", sample) ~ "AO"
+    ),
+    genotype = case_when(
+      grepl("WT", sample) ~ "WT",
+      grepl("KO", sample) ~ "KO"
+    ),
+    diet = case_when(
+      grepl("CD", sample) ~ "CD",
+      grepl("HFD", sample) ~ "HFD"
+    )
+  )
+
+rownames(metadata) <- metadata$sample
+
+# Make sure sample order matches
+metadata <- metadata[colnames(counts), ]
+
+# ----------------
+# 3. Function for DE
+# ----------------
+run_DE <- function(model_name, output_prefix) {
+  
+  keep_samples <- metadata$model == model_name
+  
+  sub_counts <- counts[, keep_samples]
+  sub_meta <- metadata[keep_samples, ]
+  
+  sub_meta$genotype <- factor(sub_meta$genotype, levels = c("WT", "KO"))
+  sub_meta$diet <- factor(sub_meta$diet, levels = c("CD", "HFD"))
+  
+  dds <- DESeqDataSetFromMatrix(
+    countData = sub_counts,
+    colData = sub_meta,
+    design = ~ diet + genotype
+  )
+  
+  # Filter low-count genes
+  dds <- dds[rowSums(counts(dds)) >= 10, ]
+  
+  dds <- DESeq(dds)
+  
+  res <- results(dds, contrast = c("genotype", "KO", "WT"))
+  res_df <- as.data.frame(res)
+  res_df$gene <- rownames(res_df)
+  
+  res_df <- res_df %>%
+    arrange(padj)
+  
+  write.csv(res_df, paste0(output_prefix, "_DE_results.csv"), row.names = FALSE)
+  
+  sig <- res_df %>%
+    filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) >= 0.58)
+  
+  write.csv(sig, paste0(output_prefix, "_significant_FDR0.05_log2FC0.58.csv"), row.names = FALSE)
+  
+  png(paste0(output_prefix, "_volcano.png"), width = 1000, height = 800)
+  EnhancedVolcano(
+    res_df,
+    lab = res_df$gene,
+    x = "log2FoldChange",
+    y = "padj",
+    title = paste0(output_prefix, " KO vs WT"),
+    pCutoff = 0.05,
+    FCcutoff = 0.58,
+    pointSize = 2,
+    labSize = 3
+  )
+  dev.off()
+  
+  return(res_df)
+}
+
+# ----------------
+# 4. Run comparisons
+# ----------------
+opa1_res <- run_DE("OPA1", "OPA1_KO_vs_WT")
+atf4_res <- run_DE("ATF4", "ATF4_KO_vs_WT")
+ao_res   <- run_DE("AO",   "AO_KO_vs_WT")
+
+# ----------------
+# 5. Check genes of interest
+# ----------------
+genes_interest <- c("Opa1", "Atf4", "Fgf21")
+
+goi_results <- bind_rows(
+  opa1_res %>% filter(gene %in% genes_interest) %>% mutate(comparison = "OPA1_KO_vs_WT"),
+  atf4_res %>% filter(gene %in% genes_interest) %>% mutate(comparison = "ATF4_KO_vs_WT"),
+  ao_res   %>% filter(gene %in% genes_interest) %>% mutate(comparison = "AO_KO_vs_WT")
+)
+
+#write.csv(goi_results, "genes_of_interest_Opa1_Atf4_Fgf21.csv", row.names = FALSE)
+
+# ----------------
+# 6. Save metadata
+# ----------------
+write.csv(metadata, "sample_metadata.csv", row.names = FALSE)
+
+
+
+```{r volcano-opa1-labelled, fig.width=10, fig.height=8, message=FALSE, warning=FALSE}
+library(EnhancedVolcano)
+
+# Genes you specifically want to label
+genes_to_label <- c("Opa1", "Atf4", "Fgf21", "Ddit3", "Hspa5", "Trib3", "Asns")
+
+# Add labels only for selected genes + top significant genes
+opa1_plot_df <- opa1_res %>%
+  mutate(
+    label_gene = case_when(
+      gene_name %in% genes_to_label ~ gene_name,
+      !is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 0.58 ~ gene_name,
+      TRUE ~ NA_character_
+    )
+  )
+
+EnhancedVolcano(
+  opa1_plot_df,
+  lab = opa1_plot_df$label_gene,
+  x = "log2FoldChange",
+  y = "padj",
+  title = "OPA1 KO vs WT",
+  subtitle = "Negative log2FC = higher in WT | Positive log2FC = higher in KO",
+  caption = "Contrast: KO vs WT, adjusted for diet",
+  pCutoff = 0.05,
+  FCcutoff = 0.58,
+  pointSize = 2,
+  labSize = 4,
+  drawConnectors = TRUE,
+  widthConnectors = 0.5,
+  max.overlaps = Inf
+)
+```

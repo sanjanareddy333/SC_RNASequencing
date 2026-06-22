@@ -1,0 +1,146 @@
+---
+title: "6-22-2026-BulkRNA_PCA_Anlaysis"
+output: html_document
+---
+```{rsetup }
+
+
+## ============================================================
+## pca_suite.R
+## Full set of QC PCAs for the OPA1 / ATF4 / AO bulk RNA-seq set.
+##
+##   (1) All samples            color = genotype, shape = diet      [1 PCA]
+##   (2) Per line (OPA1/ATF4/AO) color = diet,     shape = WT/KO     [3 PCAs]
+##   (3) Per diet (CD / HFD)     color = genotype                    [2 PCAs]
+##   (4) Per genotype group      color = diet                        [6 PCAs]
+##
+## VST is computed ONCE on the full matrix (blind); each subset then
+## re-selects its own top-variable genes before prcomp.
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(ggplot2)
+  library(ggrepel)
+  library(matrixStats)
+  library(patchwork)
+})
+
+tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
+outdir   <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/PCA_ANALYSIS"
+ # writes PNGs to working dir
+ntop_all <- 2000         # genes for full / per-diet PCAs
+ntop_sub <- 1000         # genes for per-line / per-group PCAs
+
+## ---- 1. Load + metadata (ORIGINAL labels from column names) -------------
+raw <- read.delim(tsv, check.names = FALSE)
+rownames(raw) <- make.unique(raw$gene_name)
+mat <- as.matrix(raw[, !(colnames(raw) %in% c("gene_id", "gene_name"))])
+
+parts <- strsplit(colnames(mat), "_")
+meta <- data.frame(
+  row.names  = colnames(mat),
+  genotype   = vapply(parts, function(x) paste(x[1], x[2], sep = "_"), ""),
+  geno_line  = vapply(parts, `[`, "", 1),   # OPA1 / ATF4 / AO
+  geno_short = vapply(parts, `[`, "", 2),   # WT / KO
+  diet       = vapply(parts, `[`, "", 3),
+  id         = vapply(parts, `[`, "", 4)
+)
+geno_lv <- c("OPA1_WT","OPA1_KO","ATF4_WT","ATF4_KO","AO_WT","AO_KO")
+meta$genotype   <- factor(meta$genotype, levels = geno_lv)
+meta$geno_short <- factor(meta$geno_short, levels = c("WT","KO"))
+meta$diet       <- factor(meta$diet, levels = c("CD","HFD"))
+
+## ---- OPTIONAL: use CORRECTED labels instead -----------------------------
+## cd <- read.csv("colData_corrected.csv", row.names = 1)
+## cd <- cd[cd$status != "remove", ]          # drop excluded partial responders
+## # for PENDING_PCA samples keep their original group so you can SEE them:
+## cd$grp <- ifelse(cd$final_genotype == "PENDING_PCA",
+##                  cd$orig_genotype, cd$final_genotype)
+## mat  <- mat[, rownames(cd)]
+## meta <- meta[rownames(cd), ]; meta$genotype <- factor(cd$grp, levels = geno_lv)
+
+## ---- 2. DESeq2 VST (once, blind) ----------------------------------------
+dds <- DESeqDataSetFromMatrix(round(mat), meta, design = ~ 1)
+dds <- dds[rowSums(counts(dds) >= 10) >= 3, ]
+vsd <- vst(dds, blind = TRUE)
+
+## ---- 3. Palettes --------------------------------------------------------
+geno_cols  <- c(OPA1_WT="#c0392b", OPA1_KO="#e8836a",
+                ATF4_WT="#1f4e9c", ATF4_KO="#6fa8dc",
+                AO_WT  ="#1e5631", AO_KO  ="#93c47d")
+diet_cols  <- c(CD = "#4C72B0", HFD = "#DD8452")
+short_cols <- c(WT = "#2c7fb8", KO = "#de2d26")
+diet_shp   <- c(CD = 16, HFD = 17)
+short_shp  <- c(WT = 16, KO = 17)
+
+## ---- 4. PCA helper ------------------------------------------------------
+run_pca <- function(samples, ntop, color_by, shape_by = NULL, title) {
+  m   <- assay(vsd)[, samples, drop = FALSE]
+  rv  <- rowVars(m)
+  sel <- order(rv, decreasing = TRUE)[seq_len(min(ntop, sum(rv > 0)))]
+  pc  <- prcomp(t(m[sel, ]), center = TRUE, scale. = FALSE)
+  ve  <- round(100 * pc$sdev^2 / sum(pc$sdev^2), 1)
+  d   <- data.frame(pc$x[, 1:2], meta[samples, ])
+
+  pt_aes <- aes(color = .data[[color_by]])
+  if (!is.null(shape_by)) pt_aes <- modifyList(pt_aes, aes(shape = .data[[shape_by]]))
+
+  g <- ggplot(d, aes(PC1, PC2)) +
+    geom_hline(yintercept = 0, color = "grey85", linewidth = .3) +
+    geom_vline(xintercept = 0, color = "grey85", linewidth = .3) +
+    geom_point(pt_aes, size = 3.4, stroke = .4) +
+    geom_text_repel(aes(label = id), size = 2.5, color = "grey25",
+                    max.overlaps = Inf, segment.size = .2,
+                    min.segment.length = .3, seed = 1) +
+    labs(x = sprintf("PC1 (%.1f%%)", ve[1]),
+         y = sprintf("PC2 (%.1f%%)", ve[2]), title = title) +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold", size = 11))
+
+  col_pal <- switch(color_by, genotype = geno_cols, diet = diet_cols,
+                    geno_short = short_cols)
+  g <- g + scale_color_manual(values = col_pal)
+  if (!is.null(shape_by)) {
+    shp <- switch(shape_by, diet = diet_shp, geno_short = short_shp)
+    g <- g + scale_shape_manual(values = shp)
+  }
+  g
+}
+
+S <- function(...) rownames(meta)[with(meta, ...)]   # subset-by-condition helper
+
+## ---- (1) All samples ----------------------------------------------------
+p_all <- run_pca(rownames(meta), ntop_all, "genotype", "diet",
+                 "All samples")
+ggsave(file.path(outdir, "pca_1_all_samples.png"), p_all,
+       width = 10, height = 8, dpi = 150)
+
+## ---- (2) Per line: OPA1 / ATF4 / AO  (color diet, shape WT/KO) -----------
+p_opa1 <- run_pca(S(geno_line == "OPA1"), ntop_sub, "diet", "geno_short", "OPA1 line")
+p_atf4 <- run_pca(S(geno_line == "ATF4"), ntop_sub, "diet", "geno_short", "ATF4 line")
+p_ao   <- run_pca(S(geno_line == "AO"),   ntop_sub, "diet", "geno_short", "AO line")
+ggsave(file.path(outdir, "pca_2_per_line.png"),
+       p_opa1 + p_atf4 + p_ao + plot_layout(nrow = 1),
+       width = 16, height = 5.5, dpi = 150)
+
+## ---- (3) Per diet: CD / HFD  (color genotype) ---------------------------
+p_cd  <- run_pca(S(diet == "CD"),  ntop_all, "genotype", NULL, "CD samples")
+p_hfd <- run_pca(S(diet == "HFD"), ntop_all, "genotype", NULL, "HFD samples")
+ggsave(file.path(outdir, "pca_3_per_diet.png"),
+       p_cd + p_hfd + plot_layout(nrow = 1),
+       width = 14, height = 6, dpi = 150)
+
+## ---- (4) Per genotype group  (color diet) -------------------------------
+group_plots <- lapply(geno_lv, function(g)
+  run_pca(S(genotype == g), ntop_sub, "diet", NULL, g))
+ggsave(file.path(outdir, "pca_4_per_group.png"),
+       wrap_plots(group_plots, ncol = 3) +
+         plot_annotation(title = "PCA per genotype group (color = diet)"),
+       width = 16, height = 9, dpi = 150)
+
+cat("Wrote:\n  pca_1_all_samples.png\n  pca_2_per_line.png",
+    "\n  pca_3_per_diet.png\n  pca_4_per_group.png\n")
+
+```

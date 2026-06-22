@@ -1,0 +1,221 @@
+---
+title: "Sample"
+output: html_document
+---
+```{rsetup }
+# ============================================================
+# Bulk RNA-seq analysis up to PCA
+# Using nf-core/rnaseq STAR-Salmon output
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(DESeq2)
+  library(ggplot2)
+})
+
+# ------------------------------------------------------------
+# 1. Set working directory
+# Change this path if needed
+# ------------------------------------------------------------
+
+setwd("Results/star_salmon")
+
+# ------------------------------------------------------------
+# 2. Load merged Salmon gene-level SummarizedExperiment object
+# ------------------------------------------------------------
+
+se <- readRDS("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/salmon.merged.gene.SummarizedExperiment.rds")
+
+# Check object
+se
+assayNames(se)
+dim(se)
+
+# ------------------------------------------------------------
+# 3. Extract raw gene counts
+# ------------------------------------------------------------
+
+counts_mat <- assay(se)
+
+remove_samples <- c("A1", "D1", "G1")
+
+counts_mat <- counts_mat[, !colnames(counts_mat) %in% remove_samples]
+
+cat("Samples after removing A1, D1, G1:\n")
+print(colnames(counts_mat))
+
+
+# Check counts
+counts_mat[1:5, 1:5]
+
+# ------------------------------------------------------------
+# 4. Create sample metadata from sample names
+# ------------------------------------------------------------
+
+sample_names <- colnames(counts_mat)
+
+sample_info <- data.frame(
+  sample_id = sample_names,
+  stringsAsFactors = FALSE
+)
+
+# Example sample name:
+# OPA1_WT_CD_1
+# OPA1_KO_HFD_12
+# ATF4_WT_CD_13
+# AO_KO_CD_25
+
+sample_info$gene_group <- sub("^(OPA1|ATF4|AO)_.*", "\\1", sample_info$sample_id)
+sample_info$status <- sub("^(OPA1|ATF4|AO)_(WT|KO)_.*", "\\2", sample_info$sample_id)
+sample_info$diet <- sub("^(OPA1|ATF4|AO)_(WT|KO)_(CD|HFD)_.*", "\\3", sample_info$sample_id)
+
+# Remove final replicate/sample number or letter-number part
+sample_info$condition <- sub("_[^_]+$", "", sample_info$sample_id)
+
+# Convert to factors
+sample_info$gene_group <- factor(sample_info$gene_group)
+sample_info$status <- factor(sample_info$status, levels = c("WT", "KO"))
+sample_info$diet <- factor(sample_info$diet, levels = c("CD", "HFD"))
+sample_info$condition <- factor(sample_info$condition)
+
+rownames(sample_info) <- sample_info$sample_id
+
+# Check metadata
+print(sample_info)
+
+# ------------------------------------------------------------
+# 5. Make sure sample order matches count matrix
+# ------------------------------------------------------------
+
+counts_mat <- counts_mat[, sample_info$sample_id]
+
+stopifnot(all(colnames(counts_mat) == rownames(sample_info)))
+
+# ------------------------------------------------------------
+# 6. Filter low-expression genes
+# Keep genes with count >= 10 in at least 3 samples
+# ------------------------------------------------------------
+
+keep <- rowSums(counts_mat >= 10) >= 3
+counts_filtered <- counts_mat[keep, ]
+
+cat("Genes before filtering:", nrow(counts_mat), "\n")
+cat("Genes after filtering:", nrow(counts_filtered), "\n")
+
+# ------------------------------------------------------------
+# 7. Create DESeq2 object
+# For PCA, condition-based design is fine
+# ------------------------------------------------------------
+
+dds <- DESeqDataSetFromMatrix(
+  countData = round(counts_filtered),
+  colData = sample_info,
+  design = ~ condition
+)
+
+# ------------------------------------------------------------
+# 8. Run DESeq2 normalization
+# ------------------------------------------------------------
+
+dds <- DESeq(dds)
+
+# ------------------------------------------------------------
+# 9. Variance stabilizing transformation
+# ------------------------------------------------------------
+
+vsd <- vst(dds, blind = FALSE)
+
+# ------------------------------------------------------------
+# 10. PCA plot colored by condition
+# ------------------------------------------------------------
+
+output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/PCA_RESULTS/SAMPLE1"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+pca_condition <- plotPCA(vsd, intgroup = "condition") +
+  ggtitle("PCA Plot - Bulk RNA-seq Samples by Condition") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(pca_condition)
+
+ggsave(
+  filename = "PCA_by_condition.pdf",
+  plot = pca_condition,
+  width = 8,
+  height = 6
+)
+
+# ------------------------------------------------------------
+# 11. PCA plot colored by gene group
+# ------------------------------------------------------------
+
+pca_gene_group <- plotPCA(vsd, intgroup = "gene_group") +
+  ggtitle("PCA Plot by Gene Group") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(pca_gene_group)
+
+ggsave(
+  filename = "PCA_by_gene_group.pdf",
+  plot = pca_gene_group,
+  width = 8,
+  height = 6
+)
+
+# ------------------------------------------------------------
+# 12. PCA plot colored by status WT/KO
+# ------------------------------------------------------------
+
+pca_status <- plotPCA(vsd, intgroup = "status") +
+  ggtitle("PCA Plot by WT/KO Status") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(pca_status)
+
+ggsave(
+  filename = "PCA_by_status.pdf",
+  plot = pca_status,
+  width = 8,
+  height = 6
+)
+
+# ------------------------------------------------------------
+# 13. PCA plot colored by diet
+# ------------------------------------------------------------
+
+pca_diet <- plotPCA(vsd, intgroup = "diet") +
+  ggtitle("PCA Plot by Diet") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(pca_diet)
+
+ggsave(
+  filename = "PCA_by_diet.pdf",
+  plot = pca_diet,
+  width = 8,
+  height = 6
+)
+
+# ------------------------------------------------------------
+# 14. Save processed objects for later DE analysis
+# ------------------------------------------------------------
+
+saveRDS(dds, "dds_object_before_DE.rds")
+saveRDS(vsd, "vst_object_for_PCA.rds")
+write.csv(sample_info, "sample_metadata_used_for_DESeq2.csv")
+
+cat("PCA analysis completed successfully.\n")
+```

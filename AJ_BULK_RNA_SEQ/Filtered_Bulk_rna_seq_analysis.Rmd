@@ -1,0 +1,347 @@
+---
+title: "Filtered_Bulk_rna_seq_analysis"
+output: html_document
+---
+
+```{rsetup }
+# ============================================================
+# DESeq2 Analysis: OPA1 and ATF4 WT vs KO — CLEANED VERSION
+# Removed problem samples:
+#   OPA1: OPA1_KO_CD_7, OPA1_KO_CD_F1 (expressed like WT)
+#   ATF4: ATF4_WT_CD_13, ATF4_WT_HFD_16 (expressed like KO)
+#          ATF4_KO_HFD_35 (expressed like WT)
+# Input: salmon.merged.gene_counts_length_scaled.tsv
+# ============================================================
+
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(tibble)
+
+# ============================================================
+# STEP 1: Load the count matrix
+# ============================================================
+
+counts_raw <- read.delim("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/salmon.merged.gene_counts_length_scaled.tsv",  row.names = 1, check.names = FALSE)
+
+gene_names <- counts_raw$gene_name
+counts_raw <- counts_raw[, -1]
+counts_mat <- round(as.matrix(counts_raw))
+
+cat("Count matrix dimensions:", dim(counts_mat), "\n")
+
+# ============================================================
+# STEP 2: Define CLEANED sample metadata
+# Removed: OPA1_KO_CD_7, OPA1_KO_CD_F1
+#          ATF4_WT_CD_13, ATF4_WT_HFD_16, ATF4_KO_HFD_35
+# ============================================================
+
+sample_info <- data.frame(
+  sample_id = c(
+    # OPA1 WT CD (all 3 kept)
+    "OPA1_WT_CD_1", "OPA1_WT_CD_2", "OPA1_WT_CD_3",
+    # OPA1 WT HFD (all 3 kept)
+    "OPA1_WT_HFD_4", "OPA1_WT_HFD_5", "OPA1_WT_HFD_6",
+    # OPA1 KO CD — REMOVED 7 and F1 (expressed like WT)
+    "OPA1_KO_CD_8", "OPA1_KO_CD_9", "OPA1_KO_CD_10", "OPA1_KO_CD_11",
+    # OPA1 KO HFD (all 3 kept)
+    "OPA1_KO_HFD_12", "OPA1_KO_HFD_C1", "OPA1_KO_HFD_E1",
+    # ATF4 WT CD — REMOVED 13 (expressed like KO)
+    "ATF4_WT_CD_14", "ATF4_WT_CD_18",
+    # ATF4 WT HFD — REMOVED 16 (expressed like KO)
+    "ATF4_WT_HFD_15", "ATF4_WT_HFD_17",
+    # ATF4 KO CD (all 3 kept)
+    "ATF4_KO_CD_31", "ATF4_KO_CD_32", "ATF4_KO_CD_36",
+    # ATF4 KO HFD — REMOVED 35 (expressed like WT)
+    "ATF4_KO_HFD_33", "ATF4_KO_HFD_34"
+  ),
+  genotype_gene = c(
+    rep("OPA1", 13),   # 6 WT + 7 KO (after removing 2)
+    rep("ATF4", 9)     # 4 WT + 5 KO (after removing 3)
+  ),
+  KO_status = c(
+    # OPA1
+    rep("WT", 3), rep("WT", 3),          # 6 WT
+    rep("KO", 4), rep("KO", 3),          # 7 KO
+    # ATF4
+    rep("WT", 2), rep("WT", 2),          # 4 WT
+    rep("KO", 3), rep("KO", 2)           # 5 KO
+  ),
+  diet = c(
+    # OPA1
+    rep("CD", 3), rep("HFD", 3),         # OPA1 WT
+    rep("CD", 4), rep("HFD", 3),         # OPA1 KO
+    # ATF4
+    rep("CD", 2), rep("HFD", 2),         # ATF4 WT
+    rep("CD", 3), rep("HFD", 2)          # ATF4 KO
+  ),
+  stringsAsFactors = FALSE
+)
+
+rownames(sample_info) <- sample_info$sample_id
+
+# Print sample counts per group
+cat("\n--- Sample counts after cleaning ---\n")
+sample_info %>%
+  group_by(genotype_gene, KO_status, diet) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  print()
+
+# ============================================================
+# STEP 3: Find gene IDs for OPA1 and ATF4
+# ============================================================
+
+opa1_id <- rownames(counts_raw)[grep("^Opa1$", gene_names, ignore.case = TRUE)[1]]
+atf4_id <- rownames(counts_raw)[grep("^Atf4$", gene_names, ignore.case = TRUE)[1]]
+cat("\nOPA1 Ensembl ID:", opa1_id)
+cat("\nATF4 Ensembl ID:", atf4_id, "\n")
+
+# ============================================================
+# STEP 4: OPA1 CLEAN Analysis
+# ============================================================
+
+cat("\n========== OPA1 CLEAN ANALYSIS ==========\n")
+cat("Removed: OPA1_KO_CD_7 and OPA1_KO_CD_F1\n\n")
+
+opa1_samples <- sample_info %>% filter(genotype_gene == "OPA1")
+opa1_counts  <- counts_mat[, opa1_samples$sample_id]
+
+opa1_coldata <- opa1_samples
+opa1_coldata$KO_status <- factor(opa1_coldata$KO_status, levels = c("WT", "KO"))
+opa1_coldata$diet      <- factor(opa1_coldata$diet,      levels = c("CD", "HFD"))
+
+dds_opa1 <- DESeqDataSetFromMatrix(
+  countData = opa1_counts,
+  colData   = opa1_coldata,
+  design    = ~ diet + KO_status
+)
+
+dds_opa1 <- dds_opa1[rowSums(counts(dds_opa1) >= 10) >= 3, ]
+dds_opa1 <- DESeq(dds_opa1)
+
+res_opa1 <- results(dds_opa1,
+                    contrast = c("KO_status", "KO", "WT"),
+                    alpha = 0.05)
+
+res_opa1_df <- as.data.frame(res_opa1) %>%
+  rownames_to_column("gene_id") %>%
+  mutate(gene_name = gene_names[match(gene_id, rownames(counts_raw))]) %>%
+  arrange(padj)
+
+cat("Significant genes (padj < 0.05):", sum(res_opa1_df$padj < 0.05, na.rm = TRUE), "\n")
+
+opa1_gene_result <- res_opa1_df %>%
+  filter(grepl("^Opa1$", gene_name, ignore.case = TRUE))
+cat("\nOPA1 gene result:\n")
+print(opa1_gene_result[, c("gene_id", "gene_name", "baseMean", "log2FoldChange", "pvalue", "padj")])
+
+write.csv(res_opa1_df, "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/OPA1_KO_vs_WT_CLEAN_DESeq2_results.csv", row.names = FALSE)
+cat("Saved: OPA1_KO_vs_WT_CLEAN_DESeq2_results.csv\n")
+
+# ============================================================
+# STEP 5: ATF4 CLEAN Analysis
+# ============================================================
+
+cat("\n========== ATF4 CLEAN ANALYSIS ==========\n")
+cat("Removed: ATF4_WT_CD_13, ATF4_WT_HFD_16, ATF4_KO_HFD_35\n\n")
+
+atf4_samples <- sample_info %>% filter(genotype_gene == "ATF4")
+atf4_counts  <- counts_mat[, atf4_samples$sample_id]
+
+atf4_coldata <- atf4_samples
+atf4_coldata$KO_status <- factor(atf4_coldata$KO_status, levels = c("WT", "KO"))
+atf4_coldata$diet      <- factor(atf4_coldata$diet,      levels = c("CD", "HFD"))
+
+dds_atf4 <- DESeqDataSetFromMatrix(
+  countData = atf4_counts,
+  colData   = atf4_coldata,
+  design    = ~ diet + KO_status
+)
+
+dds_atf4 <- dds_atf4[rowSums(counts(dds_atf4) >= 10) >= 3, ]
+dds_atf4 <- DESeq(dds_atf4)
+
+res_atf4 <- results(dds_atf4,
+                    contrast = c("KO_status", "KO", "WT"),
+                    alpha = 0.05)
+
+res_atf4_df <- as.data.frame(res_atf4) %>%
+  rownames_to_column("gene_id") %>%
+  mutate(gene_name = gene_names[match(gene_id, rownames(counts_raw))]) %>%
+  arrange(padj)
+
+cat("Significant genes (padj < 0.05):", sum(res_atf4_df$padj < 0.05, na.rm = TRUE), "\n")
+
+atf4_gene_result <- res_atf4_df %>%
+  filter(grepl("^Atf4$", gene_name, ignore.case = TRUE))
+cat("\nATF4 gene result:\n")
+print(atf4_gene_result[, c("gene_id", "gene_name", "baseMean", "log2FoldChange", "pvalue", "padj")])
+
+write.csv(res_atf4_df, "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/ATF4_KO_vs_WT_CLEAN_DESeq2_results.csv", row.names = FALSE)
+cat("Saved: ATF4_KO_vs_WT_CLEAN_DESeq2_results.csv\n")
+
+# ============================================================
+# STEP 6: Boxplots — normalized expression of target genes
+# ============================================================
+
+plot_gene_counts <- function(dds, gene_id, gene_label) {
+  norm_counts <- counts(dds, normalized = TRUE)
+
+  if (!gene_id %in% rownames(norm_counts)) {
+    cat("Gene", gene_id, "not found\n"); return(NULL)
+  }
+
+  plot_df <- data.frame(
+    count     = norm_counts[gene_id, ],
+    KO_status = colData(dds)$KO_status,
+    diet      = colData(dds)$diet
+  )
+
+  ggplot(plot_df, aes(x = KO_status, y = count, fill = KO_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(aes(color = diet), width = 0.15, size = 3) +
+    scale_fill_manual(values  = c("WT" = "#4878CF", "KO" = "#D65F5F")) +
+    scale_color_manual(values = c("CD" = "black",   "HFD" = "orange")) +
+    labs(
+      title    = paste(gene_label, "Normalized Expression: WT vs KO (Cleaned)"),
+      subtitle = "Outlier samples removed | Each dot = one sample | color = diet",
+      x = "Genotype", y = "DESeq2 Normalized Counts",
+      fill = "Genotype", color = "Diet"
+    ) +
+    theme_classic(base_size = 14) +
+    theme(plot.title = element_text(face = "bold"))
+}
+
+# OPA1 boxplot
+if (!is.na(opa1_id)) {
+  p <- plot_gene_counts(dds_opa1, opa1_id, "OPA1")
+  if (!is.null(p)) {
+    ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/OPA1_expression_CLEAN.pdf", p, width = 6, height = 5)
+    ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/OPA1_expression_CLEAN.png", p, width = 6, height = 5, dpi = 150)
+    cat("\nOPA1 boxplot saved.\n")
+  }
+}
+
+# ATF4 boxplot
+if (!is.na(atf4_id)) {
+  p <- plot_gene_counts(dds_atf4, atf4_id, "ATF4")
+  if (!is.null(p)) {
+    ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/ATF4_expression_CLEAN.pdf", p, width = 6, height = 5)
+    ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/ATF4_expression_CLEAN.png", p, width = 6, height = 5, dpi = 150)
+    cat("\nATF4 boxplot saved.\n")
+  }
+}
+
+# ============================================================
+# STEP 7: Volcano plots
+# ============================================================
+
+plot_volcano <- function(res_df, gene_label, highlight_gene,
+                         lfc_thresh = 0.5, fdr_thresh = 0.05, top_n_label = 20) {
+
+  df <- res_df %>%
+    filter(!is.na(padj), !is.na(log2FoldChange)) %>%
+    mutate(
+      neg_log10_padj = -log10(padj),
+      category = case_when(
+        padj < fdr_thresh & log2FoldChange >  lfc_thresh ~ "Upregulated",
+        padj < fdr_thresh & log2FoldChange < -lfc_thresh ~ "Downregulated",
+        TRUE ~ "Not significant"
+      ),
+      is_target = grepl(paste0("^", highlight_gene, "$"), gene_name, ignore.case = TRUE)
+    )
+
+  top_genes <- df %>%
+    filter(category != "Not significant") %>%
+    arrange(padj) %>%
+    slice_head(n = top_n_label)
+
+  target_row <- df %>% filter(is_target)
+  label_df   <- bind_rows(top_genes, target_row) %>% distinct()
+
+  n_up   <- sum(df$category == "Upregulated")
+  n_down <- sum(df$category == "Downregulated")
+
+  colors <- c("Upregulated"     = "#D62728",
+              "Downregulated"   = "#1F77B4",
+              "Not significant" = "grey75")
+
+  ggplot(df, aes(x = log2FoldChange, y = neg_log10_padj, color = category)) +
+    geom_point(aes(size = is_target), alpha = 0.6) +
+    scale_size_manual(values = c("FALSE" = 1.5, "TRUE" = 5), guide = "none") +
+    geom_vline(xintercept = c(-lfc_thresh, lfc_thresh),
+               linetype = "dashed", color = "black", linewidth = 0.4) +
+    geom_hline(yintercept = -log10(fdr_thresh),
+               linetype = "dashed", color = "black", linewidth = 0.4) +
+    geom_point(data = filter(df, is_target),
+               aes(x = log2FoldChange, y = neg_log10_padj),
+               color = "black", size = 6, shape = 21,
+               fill = ifelse(filter(df, is_target)$log2FoldChange < 0,
+                             "#1F77B4", "#D62728"),
+               stroke = 1.5) +
+    geom_text_repel(
+      data         = label_df,
+      aes(label    = gene_name),
+      size         = 3,
+      max.overlaps = 20,
+      box.padding  = 0.4,
+      point.padding = 0.3,
+      segment.color = "grey50",
+      fontface = ifelse(label_df$is_target, "bold.italic", "plain"),
+      color    = "black"
+    ) +
+    scale_color_manual(values = colors, name = "Expression") +
+    labs(
+      title    = paste0(gene_label, " KO vs WT — Volcano Plot (Cleaned)"),
+      subtitle = paste0("↑ ", n_up, " upregulated   |   ↓ ", n_down,
+                        " downregulated   (FDR < ", fdr_thresh,
+                        ", |log2FC| > ", lfc_thresh, ")"),
+      x = "log2 Fold Change (KO / WT)",
+      y = "-log10 adjusted p-value"
+    ) +
+    theme_classic(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 15),
+      plot.subtitle    = element_text(color = "grey40", size = 10),
+      legend.position  = "right",
+      panel.grid.major = element_line(color = "grey92", linewidth = 0.3)
+    )
+}
+
+# OPA1 volcano
+p_v_opa1 <- plot_volcano(res_opa1_df, "OPA1", "Opa1")
+ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/OPA1_volcano_CLEAN.pdf", p_v_opa1, width = 8, height = 6)
+ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/OPA1_volcano_CLEAN.png", p_v_opa1, width = 8, height = 6, dpi = 150)
+cat("\nOPA1 volcano saved.\n")
+
+# ATF4 volcano
+p_v_atf4 <- plot_volcano(res_atf4_df, "ATF4", "Atf4")
+ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/ATF4_volcano_CLEAN.pdf", p_v_atf4, width = 8, height = 6)
+ggsave("/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/ATF4_volcano_CLEAN.png", p_v_atf4, width = 8, height = 6, dpi = 150)
+cat("\nATF4 volcano saved.\n")
+
+# ============================================================
+# STEP 8: Final summary table
+# ============================================================
+
+cat("\n========== FINAL SUMMARY ==========\n")
+
+summary_df <- bind_rows(
+  opa1_gene_result %>% mutate(analysis = "OPA1_KO_vs_WT_CLEAN"),
+  atf4_gene_result %>% mutate(analysis = "ATF4_KO_vs_WT_CLEAN")
+) %>%
+  select(analysis, gene_name, baseMean, log2FoldChange, lfcSE, pvalue, padj)
+
+print(summary_df)
+write.csv(summary_df, "OPA1_ATF4_gene_summary_CLEAN.csv", row.names = FALSE)
+
+cat("\n========== ALL OUTPUT FILES ==========\n")
+cat("  - OPA1_KO_vs_WT_CLEAN_DESeq2_results.csv\n")
+cat("  - ATF4_KO_vs_WT_CLEAN_DESeq2_results.csv\n")
+cat("  - OPA1_ATF4_gene_summary_CLEAN.csv\n")
+cat("  - OPA1_expression_CLEAN.pdf/.png\n")
+cat("  - ATF4_expression_CLEAN.pdf/.png\n")
+cat("  - OPA1_volcano_CLEAN.pdf/.png\n")
+cat("  - ATF4_volcano_CLEAN.pdf/.png\n")
+```

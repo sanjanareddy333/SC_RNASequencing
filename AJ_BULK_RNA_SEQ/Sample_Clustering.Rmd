@@ -1,0 +1,153 @@
+---
+title: "Sample_Clustering"
+output: html_document
+---
+```{rsetup }
+# ============================================================
+# UNSUPERVISED CLUSTERING — All Samples (No Labels)
+# Based on VST-transformed counts, top 500 variable genes
+# ============================================================
+
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(dendextend)
+library(factoextra)   # for fviz_cluster (k-means viz)
+
+output_dir <- "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/CLUSTERING_RESULTS"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================
+# Re-use the vst_all object from your PCA script
+# (run this in the same R session, or reload vst_all)
+# ============================================================
+
+# Extract VST matrix — top 500 most variable genes
+vst_mat <- assay(vst_all)
+
+top500 <- order(rowVars(vst_mat), decreasing = TRUE)[1:500]
+vst_top <- vst_mat[top500, ]
+
+# ============================================================
+# PLOT 1: Sample-to-Sample Distance Heatmap
+# Euclidean distance between all pairs of samples
+# ============================================================
+
+sample_dists <- dist(t(vst_top), method = "euclidean")
+dist_matrix  <- as.matrix(sample_dists)
+
+# Color palette
+heat_colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+pdf(file.path(output_dir, "Sample_Distance_Heatmap.pdf"), width = 14, height = 12)
+pheatmap(
+  dist_matrix,
+  clustering_distance_rows = sample_dists,
+  clustering_distance_cols = sample_dists,
+  clustering_method        = "complete",
+  color                    = heat_colors,
+  show_rownames            = TRUE,
+  show_colnames            = TRUE,
+  fontsize                 = 7,
+  main                     = "Sample-to-Sample Euclidean Distance\n(Top 500 Variable Genes, Unsupervised)"
+)
+dev.off()
+
+png(file.path(output_dir, "Sample_Distance_Heatmap.png"),
+    width = 1400, height = 1200, res = 150)
+pheatmap(
+  dist_matrix,
+  clustering_distance_rows = sample_dists,
+  clustering_distance_cols = sample_dists,
+  clustering_method        = "complete",
+  color                    = heat_colors,
+  show_rownames            = TRUE,
+  show_colnames            = TRUE,
+  fontsize                 = 7,
+  main                     = "Sample-to-Sample Euclidean Distance\n(Top 500 Variable Genes, Unsupervised)"
+)
+dev.off()
+cat("Plot 1 saved: Sample_Distance_Heatmap\n")
+
+# ============================================================
+# PLOT 2: Hierarchical Clustering Dendrogram
+# ============================================================
+
+hc <- hclust(sample_dists, method = "complete")
+
+pdf(file.path(output_dir, "Hierarchical_Clustering_Dendrogram.pdf"), width = 18, height = 7)
+par(mar = c(10, 4, 4, 2))
+plot(hc,
+     main  = "Hierarchical Clustering — All Samples (Unsupervised)",
+     sub   = "Euclidean distance | Complete linkage | Top 500 variable genes",
+     xlab  = "",
+     ylab  = "Distance",
+     cex   = 0.65)
+abline(h = 30, col = "red", lty = 2, lwd = 1.2)  # visual cut line — adjust h as needed
+dev.off()
+cat("Plot 2 saved: Hierarchical_Clustering_Dendrogram\n")
+
+# ============================================================
+# PLOT 3: K-Means Clustering on PCA space
+# Try k = 3 (one per genotype), change as needed
+# ============================================================
+
+pca_coords <- prcomp(t(vst_top), scale. = FALSE)
+pca_df     <- as.data.frame(pca_coords$x[, 1:2])
+pca_df$sample_id <- rownames(pca_df)
+
+# --- Elbow plot to help choose k ---
+set.seed(42)
+fviz_nbclust(pca_df[, 1:2], kmeans, method = "wss", k.max = 10) +
+  labs(title = "Elbow Method — Optimal k for K-Means") +
+  theme_classic()
+ggsave(file.path(output_dir, "KMeans_Elbow_Plot.pdf"), width = 7, height = 5)
+ggsave(file.path(output_dir, "KMeans_Elbow_Plot.png"), width = 7, height = 5, dpi = 150)
+
+# --- K-means with k = 3 (adjust after looking at elbow plot) ---
+set.seed(42)
+k <- 3
+km_res <- kmeans(pca_df[, 1:2], centers = k, nstart = 25)
+pca_df$cluster <- factor(km_res$cluster)
+
+p_km <- ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster, label = sample_id)) +
+  geom_point(size = 2.5, alpha = 0.9) +
+  ggrepel::geom_text_repel(size = 2, max.overlaps = 30,
+                            box.padding = 0.3, show.legend = FALSE) +
+  stat_ellipse(aes(group = cluster), level = 0.75,
+               linetype = "dashed", linewidth = 0.5) +
+  scale_color_brewer(palette = "Set1", name = paste0("Cluster (k=", k, ")")) +
+  labs(
+    title    = paste0("K-Means Clustering (k = ", k, ") — All Samples"),
+    subtitle = "No labels used — purely unsupervised | Top 500 variable genes",
+    x = "PC1", y = "PC2"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey40", size = 10))
+
+ggsave(file.path(output_dir, "KMeans_Clustering_PCA.pdf"), p_km, width = 10, height = 7)
+ggsave(file.path(output_dir, "KMeans_Clustering_PCA.png"), p_km, width = 10, height = 7, dpi = 150)
+cat("Plot 3 saved: KMeans_Clustering_PCA (k =", k, ")\n")
+
+# ============================================================
+# Save cluster assignments
+# ============================================================
+
+cluster_table <- pca_df %>%
+  dplyr::select(sample_id, PC1, PC2, cluster) %>%
+  dplyr::arrange(cluster)
+
+write.csv(cluster_table,
+          file.path(output_dir, "KMeans_Cluster_Assignments.csv"),
+          row.names = FALSE)
+
+cat("\n========== OUTPUT FILES ==========\n")
+cat("Saved to:", output_dir, "\n")
+cat("  - Sample_Distance_Heatmap.pdf/.png\n")
+cat("  - Hierarchical_Clustering_Dendrogram.pdf/.png\n")
+cat("  - KMeans_Elbow_Plot.pdf/.png\n")
+cat("  - KMeans_Clustering_PCA.pdf/.png\n")
+cat("  - KMeans_Cluster_Assignments.csv\n")
+```

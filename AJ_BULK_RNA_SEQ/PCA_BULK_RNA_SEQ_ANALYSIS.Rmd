@@ -1,0 +1,409 @@
+---
+title: "PCA_BULK_RNA_SEQ_ANALYSIS"
+output: html_document
+---
+
+```{r setup}
+# ============================================================
+# PCA Plot — All Samples + Per Genotype Group
+# ============================================================
+
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(tibble)
+library(SummarizedExperiment)
+library(patchwork)
+
+# ============================================================
+# OUTPUT PATHS
+# ============================================================
+
+output_dir  <- "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/PCA_RESULTS"
+output_dir2 <- "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/PCA_PER_GENOTYPE"
+dir.create(output_dir,  showWarnings = FALSE, recursive = TRUE)
+dir.create(output_dir2, showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================
+# STEP 1: Load count matrix
+# ============================================================
+
+se         <- readRDS(
+  "/Users/preddy/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/salmon.merged.gene.SummarizedExperiment.rds"
+)
+
+# KEY FIX: as.matrix() first, then round, then force integer
+counts_mat <- as.matrix(assay(se, "counts"))
+counts_mat <- round(counts_mat)
+mode(counts_mat) <- "integer"
+
+gene_names <- rowData(se)$gene_name
+
+# Verify it's a proper integer matrix
+cat("Class:", class(counts_mat), "\n")
+cat("Mode:",  mode(counts_mat),  "\n")
+cat("Dimensions:", dim(counts_mat), "\n")
+
+# Rename samples
+colnames(counts_mat)[colnames(counts_mat) == "A1"] <- "AO_WT_HFD_A1"
+colnames(counts_mat)[colnames(counts_mat) == "D1"] <- "AO_WT_HFD_D1"
+colnames(counts_mat)[colnames(counts_mat) == "G1"] <- "AO_KO_HFD_G1"
+
+cat("Checking renamed samples:\n")
+print(colnames(counts_mat)[grep("A1|D1|B1|G1", colnames(counts_mat))])
+
+# ============================================================
+# STEP 2: Define ALL samples metadata
+# ============================================================
+
+sample_info_all <- data.frame(
+  sample_id = c(
+    # OPA1 WT CD
+    "OPA1_WT_CD_1", "OPA1_WT_CD_2", "OPA1_WT_CD_3",
+    # OPA1 WT HFD
+    "OPA1_WT_HFD_4", "OPA1_WT_HFD_5", "OPA1_WT_HFD_6",
+    # OPA1 KO CD
+    "OPA1_KO_CD_7", "OPA1_KO_CD_8", "OPA1_KO_CD_9",
+    "OPA1_KO_CD_10", "OPA1_KO_CD_11", "OPA1_KO_CD_F1",
+    # OPA1 KO HFD
+    "OPA1_KO_HFD_12", "OPA1_KO_HFD_C1", "OPA1_KO_HFD_E1",
+    # ATF4 WT CD
+    "ATF4_WT_CD_13", "ATF4_WT_CD_14", "ATF4_WT_CD_18",
+    # ATF4 WT HFD
+    "ATF4_WT_HFD_15", "ATF4_WT_HFD_16", "ATF4_WT_HFD_17",
+    # ATF4 KO CD
+    "ATF4_KO_CD_31", "ATF4_KO_CD_32", "ATF4_KO_CD_36",
+    # ATF4 KO HFD
+    "ATF4_KO_HFD_33", "ATF4_KO_HFD_34", "ATF4_KO_HFD_35",
+    # AO WT CD
+    "AO_WT_CD_19", "AO_WT_CD_20", "AO_WT_CD_21",
+    # AO WT HFD
+    "AO_WT_HFD_22", "AO_WT_HFD_23", "AO_WT_HFD_24",
+    "AO_WT_HFD_A1", "AO_WT_HFD_D1",
+    # AO KO CD
+    "AO_KO_CD_25", "AO_KO_CD_26", "AO_KO_CD_B1",
+    # AO KO HFD
+    "AO_KO_HFD_27", "AO_KO_HFD_28", "AO_KO_HFD_29", "AO_KO_HFD_30",
+    "AO_KO_HFD_G1"
+  ),
+  genotype_gene = c(
+    rep("OPA1", 15),
+    rep("ATF4", 12),
+    rep("AO",   16)
+  ),
+  KO_status = c(
+    rep("WT", 6),  rep("KO", 9),
+    rep("WT", 6),  rep("KO", 6),
+    rep("WT", 8),  rep("KO", 8)
+  ),
+  diet = c(
+    rep("CD", 3), rep("HFD", 3), rep("CD", 6), rep("HFD", 3),
+    rep("CD", 3), rep("HFD", 3), rep("CD", 3), rep("HFD", 3),
+    rep("CD", 3), rep("HFD", 5), rep("CD", 3), rep("HFD", 5)
+  ),
+  stringsAsFactors = FALSE
+)
+
+rownames(sample_info_all) <- sample_info_all$sample_id
+
+sample_info_all <- sample_info_all %>%
+  mutate(group = paste(genotype_gene, KO_status, sep = "_"))
+
+cat("Total samples:", nrow(sample_info_all), "\n")
+print(table(sample_info_all$group))
+
+# ============================================================
+# STEP 3: Build DESeq2 object for ALL samples
+# ============================================================
+
+all_counts <- counts_mat[, sample_info_all$sample_id]
+
+coldata_all <- sample_info_all
+coldata_all$KO_status     <- factor(coldata_all$KO_status,     levels = c("WT", "KO"))
+coldata_all$diet          <- factor(coldata_all$diet,          levels = c("CD", "HFD"))
+coldata_all$genotype_gene <- factor(coldata_all$genotype_gene, levels = c("OPA1", "ATF4", "AO"))
+coldata_all$group         <- factor(coldata_all$group)
+
+dds_all <- DESeqDataSetFromMatrix(
+  countData = all_counts,
+  colData   = coldata_all,
+  design    = ~ group
+)
+
+dds_all <- dds_all[rowSums(counts(dds_all) >= 10) >= 3, ]
+vst_all <- vst(dds_all, blind = TRUE)
+cat("Genes after filtering:", nrow(vst_all), "\n")
+
+# ============================================================
+# STEP 4: PCA — All Samples
+# ============================================================
+
+pca_data <- plotPCA(vst_all,
+                    intgroup   = c("genotype_gene", "KO_status", "diet"),
+                    returnData = TRUE,
+                    ntop       = 500)
+
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+cat("PC1:", percent_var[1], "% | PC2:", percent_var[2], "%\n")
+
+pca_data <- pca_data %>%
+  mutate(group     = paste(genotype_gene, KO_status, sep = "_"),
+         sample_id = rownames(.))
+
+# ============================================================
+# STEP 5: Color and shape scheme
+# ============================================================
+
+group_colors <- c(
+  "OPA1_WT" = "#2166AC",
+  "OPA1_KO" = "#92C5DE",
+  "ATF4_WT" = "#1A9641",
+  "ATF4_KO" = "#A6D96A",
+  "AO_WT"   = "#D73027",
+  "AO_KO"   = "#FDAE61"
+)
+diet_shapes <- c("CD" = 16, "HFD" = 17)
+
+# ============================================================
+# STEP 6: Plot 1 — All samples by Genotype Group
+# ============================================================
+
+p_pca1 <- ggplot(pca_data,
+                 aes(x = PC1, y = PC2,
+                     color = group, shape = diet, label = sample_id)) +
+  stat_ellipse(aes(group = group), level = 0.75,
+               linetype = "dashed", linewidth = 0.5, alpha = 0.6) +
+  geom_point(size = 2, alpha = 0.9) +
+  geom_text_repel(size = 2, max.overlaps = 20,
+                  box.padding = 0.3, show.legend = FALSE) +
+  scale_color_manual(values = group_colors, name = "Genotype_Status") +
+  scale_shape_manual(values = diet_shapes,  name = "Diet") +
+  labs(
+    title    = "PCA — All Samples",
+    subtitle = paste0("Top 500 variable genes | PC1: ", percent_var[1],
+                      "% | PC2: ", percent_var[2], "%"),
+    x = paste0("PC1 (", percent_var[1], "% variance)"),
+    y = paste0("PC2 (", percent_var[2], "% variance)")
+  ) +
+  theme_classic(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey40", size = 10),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "PCA_all_samples_by_group.pdf"), p_pca1, width = 10, height = 7)
+ggsave(file.path(output_dir, "PCA_all_samples_by_group.png"), p_pca1, width = 10, height = 7, dpi = 150)
+cat("Plot 1 saved\n")
+
+# ============================================================
+# STEP 7: Plot 2 — by KO Status
+# ============================================================
+
+p_pca2 <- ggplot(pca_data,
+                 aes(x = PC1, y = PC2,
+                     color = KO_status, shape = genotype_gene, label = sample_id)) +
+  geom_point(size = 2, alpha = 0.9) +
+  geom_text_repel(size = 2, max.overlaps = 20,
+                  box.padding = 0.3, show.legend = FALSE) +
+  scale_color_manual(values = c("WT" = "#2166AC", "KO" = "#D73027"), name = "KO Status") +
+  scale_shape_manual(values = c("OPA1" = 16, "ATF4" = 17, "AO" = 15), name = "Genotype") +
+  labs(
+    title    = "PCA — All Samples (by KO Status)",
+    subtitle = paste0("Top 500 variable genes | PC1: ", percent_var[1],
+                      "% | PC2: ", percent_var[2], "%"),
+    x = paste0("PC1 (", percent_var[1], "% variance)"),
+    y = paste0("PC2 (", percent_var[2], "% variance)")
+  ) +
+  theme_classic(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey40", size = 10),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "PCA_all_samples_by_KO.pdf"), p_pca2, width = 10, height = 7)
+ggsave(file.path(output_dir, "PCA_all_samples_by_KO.png"), p_pca2, width = 10, height = 7, dpi = 150)
+cat("Plot 2 saved\n")
+
+# ============================================================
+# STEP 8: Plot 3 — by Diet
+# ============================================================
+
+p_pca3 <- ggplot(pca_data,
+                 aes(x = PC1, y = PC2,
+                     color = diet, shape = genotype_gene, label = sample_id)) +
+  geom_point(size = 2, alpha = 0.9) +
+  geom_text_repel(size = 2, max.overlaps = 20,
+                  box.padding = 0.3, show.legend = FALSE) +
+  scale_color_manual(values = c("CD" = "black", "HFD" = "orange"), name = "Diet") +
+  scale_shape_manual(values = c("OPA1" = 16, "ATF4" = 17, "AO" = 15), name = "Genotype") +
+  labs(
+    title    = "PCA — All Samples (by Diet)",
+    subtitle = paste0("Top 500 variable genes | PC1: ", percent_var[1],
+                      "% | PC2: ", percent_var[2], "%"),
+    x = paste0("PC1 (", percent_var[1], "% variance)"),
+    y = paste0("PC2 (", percent_var[2], "% variance)")
+  ) +
+  theme_classic(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey40", size = 10),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "PCA_all_samples_by_diet.pdf"), p_pca3, width = 10, height = 7)
+ggsave(file.path(output_dir, "PCA_all_samples_by_diet.png"), p_pca3, width = 10, height = 7, dpi = 150)
+cat("Plot 3 saved\n")
+
+# ============================================================
+# STEP 9: Save PCA coordinates
+# ============================================================
+
+write.csv(
+  pca_data %>% select(sample_id, genotype_gene, KO_status, diet, PC1, PC2),
+  file.path(output_dir, "PCA_coordinates.csv"),
+  row.names = FALSE
+)
+cat("PCA coordinates saved\n")
+
+# ============================================================
+# STEP 10: PCA per Genotype (OPA1, ATF4, AO)
+# Fresh DESeq2 + VST per group — variance within group only
+# ============================================================
+
+make_pca_per_group <- function(counts_mat, sample_info_all, genotype, color_wt, color_ko) {
+  
+  meta <- sample_info_all %>% filter(genotype_gene == genotype)
+  
+  # KEY FIX: as.matrix + mode conversion INSIDE function
+  cts <- as.matrix(counts_mat[, meta$sample_id])
+  cts <- round(cts)
+  mode(cts) <- "integer"
+  
+  coldata <- meta
+  coldata$KO_status <- factor(coldata$KO_status, levels = c("WT", "KO"))
+  coldata$diet      <- factor(coldata$diet,      levels = c("CD", "HFD"))
+  rownames(coldata) <- coldata$sample_id
+  
+  dds <- DESeqDataSetFromMatrix(countData = cts,
+                                colData   = coldata,
+                                design    = ~ KO_status + diet)
+  dds     <- dds[rowSums(counts(dds) >= 10) >= 3, ]
+  vst_obj <- vst(dds, blind = TRUE)
+  
+  cat(genotype, "— samples:", ncol(vst_obj),
+      "| genes after filter:", nrow(vst_obj), "\n")
+  
+  pca_d <- plotPCA(vst_obj, intgroup   = c("KO_status", "diet"),
+                   returnData = TRUE,  ntop = 500)
+  pv <- round(100 * attr(pca_d, "percentVar"))
+  pca_d$sample_id <- rownames(pca_d)
+  
+  ggplot(pca_d, aes(x = PC1, y = PC2,
+                    color = KO_status, shape = diet, label = sample_id)) +
+    stat_ellipse(aes(group = KO_status), level = 0.75,
+                 linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+    geom_point(size = 3, alpha = 0.95) +
+    geom_text_repel(size = 2.5, max.overlaps = 30,
+                    box.padding = 0.4, show.legend = FALSE) +
+    scale_color_manual(values = c("WT" = color_wt, "KO" = color_ko),
+                       name   = "Status",
+                       labels = c("WT" = paste(genotype, "WT"),
+                                  "KO" = paste(genotype, "KO"))) +
+    scale_shape_manual(values = c("CD" = 16, "HFD" = 17), name = "Diet") +
+    labs(
+      title    = paste("PCA —", genotype, "Samples"),
+      subtitle = paste0("Top 500 variable genes  |  PC1: ", pv[1],
+                        "%  |  PC2: ", pv[2], "%"),
+      x = paste0("PC1 (", pv[1], "% variance)"),
+      y = paste0("PC2 (", pv[2], "% variance)")
+    ) +
+    theme_classic(base_size = 13) +
+    theme(plot.title    = element_text(face = "bold", size = 15),
+          plot.subtitle = element_text(color = "grey40", size = 10),
+          legend.position = "right")
+}
+
+# ---- Run per genotype ----
+p_opa1 <- make_pca_per_group(counts_mat, sample_info_all, "OPA1", "#2166AC", "#92C5DE")
+p_atf4 <- make_pca_per_group(counts_mat, sample_info_all, "ATF4", "#1A9641", "#A6D96A")
+p_ao   <- make_pca_per_group(counts_mat, sample_info_all, "AO",   "#D73027", "#FDAE61")
+
+# ---- Save individual plots ----
+ggsave(file.path(output_dir2, "PCA_OPA1.pdf"), p_opa1, width = 8, height = 6)
+ggsave(file.path(output_dir2, "PCA_OPA1.png"), p_opa1, width = 8, height = 6, dpi = 150)
+
+ggsave(file.path(output_dir2, "PCA_ATF4.pdf"), p_atf4, width = 8, height = 6)
+ggsave(file.path(output_dir2, "PCA_ATF4.png"), p_atf4, width = 8, height = 6, dpi = 150)
+
+ggsave(file.path(output_dir2, "PCA_AO.pdf"),   p_ao,   width = 8, height = 6)
+ggsave(file.path(output_dir2, "PCA_AO.png"),   p_ao,   width = 8, height = 6, dpi = 150)
+
+# ---- Combined stacked (supplementary) ----
+combined <- p_opa1 / p_atf4 / p_ao +
+  plot_annotation(
+    title   = "PCA — Per Genotype Group",
+    caption = "VST-normalized | Top 500 variable genes | Blind = TRUE",
+    theme   = theme(plot.title   = element_text(face = "bold", size = 18, hjust = 0.5),
+                    plot.caption = element_text(color = "grey50", size = 9))
+  )
+ggsave(file.path(output_dir2, "PCA_All_Genotypes_Combined.pdf"), combined, width = 10, height = 18)
+ggsave(file.path(output_dir2, "PCA_All_Genotypes_Combined.png"), combined, width = 10, height = 18, dpi = 150)
+
+# ---- Combined wide (main figure) ----
+combined_wide <- p_opa1 | p_atf4 | p_ao
+ggsave(file.path(output_dir2, "PCA_All_Genotypes_Wide.pdf"), combined_wide, width = 24, height = 7)
+ggsave(file.path(output_dir2, "PCA_All_Genotypes_Wide.png"), combined_wide, width = 24, height = 7, dpi = 150)
+
+cat("\n========== ALL OUTPUT FILES ==========\n")
+cat("Global PCA saved to:", output_dir, "\n")
+cat("  - PCA_all_samples_by_group.pdf/.png\n")
+cat("  - PCA_all_samples_by_KO.pdf/.png\n")
+cat("  - PCA_all_samples_by_diet.pdf/.png\n")
+cat("  - PCA_coordinates.csv\n\n")
+cat("Per-genotype PCA saved to:", output_dir2, "\n")
+cat("  - PCA_OPA1.pdf/.png\n")
+cat("  - PCA_ATF4.pdf/.png\n")
+cat("  - PCA_AO.pdf/.png\n")
+cat("  - PCA_All_Genotypes_Combined.pdf/.png\n")
+cat("  - PCA_All_Genotypes_Wide.pdf/.png\n")
+
+# ============================================================
+# STEP 10: PCA — All Samples colored by Genotype Group (AO, ATF4, OPA1)
+# ============================================================
+
+genotype_colors <- c(
+  "OPA1" = "#2166AC",   # blue
+  "ATF4" = "#1A9641",   # green
+  "AO"   = "#D73027"    # red
+)
+
+p_pca_genotype <- ggplot(pca_data,
+                         aes(x = PC1, y = PC2,
+                             color = genotype_gene,
+                             shape = diet,
+                             label = sample_id)) +
+  stat_ellipse(aes(group = genotype_gene), level = 0.75,
+               linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+  geom_point(size = 3, alpha = 0.95) +
+  geom_text_repel(size = 2.5, max.overlaps = 30,
+                  box.padding = 0.4, show.legend = FALSE) +
+  scale_color_manual(values = genotype_colors, name = "Genotype") +
+  scale_shape_manual(values = c("CD" = 16, "HFD" = 17), name = "Diet") +
+  labs(
+    title    = "PCA — All Samples by Genotype Group",
+    subtitle = paste0("Top 500 variable genes | PC1: ", percent_var[1],
+                      "% | PC2: ", percent_var[2], "%"),
+    x = paste0("PC1 (", percent_var[1], "% variance)"),
+    y = paste0("PC2 (", percent_var[2], "% variance)")
+  ) +
+  theme_classic(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey40", size = 10),
+        legend.position = "right")
+
+ggsave(file.path(output_dir, "PCA_all_samples_by_genotype.pdf"),
+       p_pca_genotype, width = 10, height = 7)
+ggsave(file.path(output_dir, "PCA_all_samples_by_genotype.png"),
+       p_pca_genotype, width = 10, height = 7, dpi = 150)
+
+cat("Plot saved: PCA_all_samples_by_genotype\n")
+
+
+```
