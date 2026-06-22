@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
 
 tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/ko_validation_12_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/relabel_1/ko_validation_12_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -30,6 +30,25 @@ logcpm <- log2(cpm + 1)
 ## (alt: DESeq2 median-of-ratios via counts(dds, normalized=TRUE) is also fine;
 ##  CPM is used here so the figure is self-contained.)
 
+#------relabeling samples which are very confidentally known
+## ---- Relabel confirmed mis-grouped samples ------------------------------
+## Professor's KO-validation calls (concordant on Opa1 / Atf4 / Fgf21).
+## Call right after each `meta <- data.frame(...)`, while `genotype` is
+## still a character column (i.e. before the factor()/left_join lines).
+relabel_meta <- function(meta) {
+  swaps <- c("2"  = "OPA1_KO",   # OPA1_WT 2  -> OPA1_KO
+             "A1" = "AO_KO",     # AO_WT  A1 -> AO_KO (DKO)
+             "D1" = "AO_KO",     # AO_WT  D1 -> AO_KO (DKO)
+             "26" = "AO_WT",     # AO_KO  26 -> AO_WT
+             "30" = "AO_WT")     # AO_KO  30 -> AO_WT
+  hit <- meta$id %in% names(swaps)
+  meta$genotype[hit] <- swaps[meta$id[hit]]
+  # re-derive helper cols if present (PCA script uses these)
+  if ("geno_line"  %in% names(meta)) meta$geno_line  <- sub("_.*", "", meta$genotype)
+  if ("geno_short" %in% names(meta)) meta$geno_short <- sub(".*_", "", meta$genotype)
+  meta
+}
+
 ## ---- 2. Long table with metadata ----------------------------------------
 parts <- strsplit(colnames(cts), "_")
 meta <- data.frame(
@@ -39,6 +58,7 @@ meta <- data.frame(
   id       = vapply(parts, `[`, "", 4)
 )
 
+meta <- relabel_meta(meta)        # <-- apply the swaps here
 dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
 dat <- dat |>
@@ -115,7 +135,7 @@ suppressPackageStartupMessages({
 })
 
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/ko_validation_6_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation//ko_validation_6_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -132,6 +152,7 @@ meta <- data.frame(
   diet     = vapply(parts, `[`, "", 3),
   id       = vapply(parts, `[`, "", 4)
 )
+meta <- relabel_meta(meta) 
 
 dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
