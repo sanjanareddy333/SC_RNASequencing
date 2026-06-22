@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
 
 tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/relabel_1/ko_validation_12_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/RemovedSamples/ko_validation_12_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -49,6 +49,14 @@ relabel_meta <- function(meta) {
   meta
 }
 
+## ---- Drop partial responders from the analysis --------------------------
+## Incomplete KD (Opa1 not reduced and/or Fgf21 induction blunted) -> exclude.
+##   OPA1_KO: 7, F1, E1   |   AO_KO (DKO): B1, G1
+drop_partial_responders <- function(meta) {
+  drop_ids <- c("7", "F1", "E1", "B1", "G1")
+  meta[!meta$id %in% drop_ids, , drop = FALSE]
+}
+
 ## ---- 2. Long table with metadata ----------------------------------------
 parts <- strsplit(colnames(cts), "_")
 meta <- data.frame(
@@ -59,6 +67,9 @@ meta <- data.frame(
 )
 
 meta <- relabel_meta(meta)        # <-- apply the swaps here
+meta <- drop_partial_responders(meta) # remove 5 partial responders
+
+
 dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
 dat <- dat |>
@@ -135,7 +146,7 @@ suppressPackageStartupMessages({
 })
 
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation//ko_validation_6_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/RemovedSamples/ko_validation_6_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -153,6 +164,8 @@ meta <- data.frame(
   id       = vapply(parts, `[`, "", 4)
 )
 meta <- relabel_meta(meta) 
+meta <- drop_partial_responders(meta) # remove 5 partial responders
+
 
 dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
@@ -196,7 +209,8 @@ p <- ggplot(dat, aes(genotype, logcpm)) +
        subtitle = "red shading = genotype where the gene is expected LOW") +
   theme_bw(base_size = 12) +
   theme(panel.grid.minor = element_blank(),
-        strip.text = element_text(face = "bold", hjust = 0),
+        strip.text = element_tex
+        t(face = "bold", hjust = 0),
         strip.background = element_rect(fill = "grey92"))
 
 ggsave(out_png, p, width = 11, height = 13, dpi = 150)
@@ -207,15 +221,6 @@ summ <- dat |>
   summarise(mean = round(mean(logcpm), 2), n = n(), .groups = "drop") |>
   arrange(gene, genotype)
 print(as.data.frame(summ))
-
-
-
-
-
-
-
-
-
 
 
 
