@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
 
 tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/RemovedSamples/ko_validation_12_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/relabel_2/ko_validation_12_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -40,7 +40,11 @@ relabel_meta <- function(meta) {
              "A1" = "AO_KO",     # AO_WT  A1 -> AO_KO (DKO)
              "D1" = "AO_KO",     # AO_WT  D1 -> AO_KO (DKO)
              "26" = "AO_WT",     # AO_KO  26 -> AO_WT
-             "30" = "AO_WT")     # AO_KO  30 -> AO_WT
+             "30" = "AO_WT",
+             "13" = "ATF4_KO", 
+             "16" = "ATF4_KO", 
+             "35" = "ATF4_WT"
+          )    
   hit <- meta$id %in% names(swaps)
   meta$genotype[hit] <- swaps[meta$id[hit]]
   # re-derive helper cols if present (PCA script uses these)
@@ -74,7 +78,7 @@ dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
 dat <- dat |>
   pivot_longer(all_of(genes), names_to = "gene", values_to = "logcpm") |>
-  left_join(meta, by = "sample")
+  inner_join(meta, by = "sample")        # <-- inner_join, not left_join
 
 geno_lv <- c("OPA1_WT","OPA1_KO","ATF4_WT","ATF4_KO","AO_WT","AO_KO")
 dat$genotype <- factor(dat$genotype, levels = geno_lv)
@@ -146,7 +150,7 @@ suppressPackageStartupMessages({
 })
 
 genes   <- c("Opa1", "Atf4", "Fgf21")
-out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/RemovedSamples/ko_validation_6_boxplots.png"
+out_png <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/KnockOutValidation/relabel_2/ko_validation_6_boxplots.png"
 
 ## ---- 1. Load + normalize (CPM) ------------------------------------------
 raw <- read.delim(tsv, check.names = FALSE)
@@ -171,7 +175,7 @@ dat <- as.data.frame(t(logcpm[genes, , drop = FALSE]))
 dat$sample <- rownames(dat)
 dat <- dat |>
   pivot_longer(all_of(genes), names_to = "gene", values_to = "logcpm") |>
-  left_join(meta, by = "sample")
+  inner_join(meta, by = "sample")        # <-- inner_join, not left_join
 
 geno_lv <- c("OPA1_WT","OPA1_KO","ATF4_WT","ATF4_KO","AO_WT","AO_KO")
 dat$genotype <- factor(dat$genotype, levels = geno_lv)
@@ -209,8 +213,7 @@ p <- ggplot(dat, aes(genotype, logcpm)) +
        subtitle = "red shading = genotype where the gene is expected LOW") +
   theme_bw(base_size = 12) +
   theme(panel.grid.minor = element_blank(),
-        strip.text = element_tex
-        t(face = "bold", hjust = 0),
+        strip.text = element_text(face = "bold", hjust = 0),
         strip.background = element_rect(fill = "grey92"))
 
 ggsave(out_png, p, width = 11, height = 13, dpi = 150)

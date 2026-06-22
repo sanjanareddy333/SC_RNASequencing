@@ -24,6 +24,7 @@ suppressPackageStartupMessages({
   library(ggrepel)
   library(matrixStats)
   library(patchwork)
+ library(pheatmap)      
 })
 
 tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
@@ -133,8 +134,12 @@ ggsave(file.path(outdir, "pca_3_per_diet.png"),
        width = 14, height = 6, dpi = 150)
 
 ## ---- (4) Per genotype group  (color diet) -------------------------------
-group_plots <- lapply(geno_lv, function(g)
-  run_pca(S(genotype == g), ntop_sub, "diet", NULL, g))
+group_plots <- lapply(geno_lv, function(grp) {
+  samples_grp <- rownames(meta)[meta$genotype == grp]
+  run_pca(samples_grp, ntop_sub, "diet", NULL, grp)
+})
+
+
 ggsave(file.path(outdir, "pca_4_per_group.png"),
        wrap_plots(group_plots, ncol = 3) +
          plot_annotation(title = "PCA per genotype group (color = diet)"),
@@ -142,5 +147,104 @@ ggsave(file.path(outdir, "pca_4_per_group.png"),
 
 cat("Wrote:\n  pca_1_all_samples.png\n  pca_2_per_line.png",
     "\n  pca_3_per_diet.png\n  pca_4_per_group.png\n")
+
+
+## ============================================================
+## (5) Heatmap of top PC-driver genes (top 20 up / 20 down loadings)
+##     "genes used in the PCA" = highest & lowest loadings on a PC,
+##     drawn from the same top-variable-gene set the PCA was built on.
+## ============================================================
+
+pc_driver_heatmap <- function(samples, ntop, pc = 1, n = 20,
+                              file, title, cap = 3) {
+  ## same gene selection + PCA as run_pca()
+  m   <- assay(vsd)[, samples, drop = FALSE]
+  rv  <- rowVars(m)
+  sel <- order(rv, decreasing = TRUE)[seq_len(min(ntop, sum(rv > 0)))]
+  pcobj <- prcomp(t(m[sel, ]), center = TRUE, scale. = FALSE)
+
+  ## top n positive- and negative-loading genes on the chosen PC
+  load  <- pcobj$rotation[, pc]
+  up    <- names(sort(load, decreasing = TRUE))[seq_len(n)]   # + loading
+  down  <- names(sort(load, decreasing = FALSE))[seq_len(n)]  # - loading
+  genes <- c(up, down)
+
+  ## z-score each gene across these samples, cap extremes
+  z <- t(scale(t(m[genes, ])))
+  z[is.na(z)] <- 0
+  z[z >  cap] <-  cap
+  z[z < -cap] <- -cap
+
+  ## order columns by PC score so the gradient is visible
+  z <- z[, order(pcobj$x[, pc])]
+
+  ## annotations
+  ann <- meta[colnames(z), c("genotype", "diet")]
+  rann <- data.frame(PC_loading = rep(c("up (+)", "down (-)"), each = n),
+                     row.names = genes)
+  ann_colors <- list(genotype = geno_cols, diet = diet_cols,
+                     PC_loading = c("up (+)" = "#B2182B", "down (-)" = "#2166AC"))
+
+  breaks <- seq(-cap, cap, length.out = 101)
+  pal    <- colorRampPalette(c("#2166AC", "white", "#B2182B"))(100)
+
+  pheatmap(z, color = pal, breaks = breaks,
+           cluster_rows = TRUE, cluster_cols = FALSE,
+           annotation_col = ann, annotation_row = rann,
+           annotation_colors = ann_colors,
+           show_colnames = TRUE, fontsize_row = 7, fontsize_col = 7,
+           main = title, filename = file, width = 10, height = 9.5)
+}
+
+## Heatmap for the all-samples PCA, PC1 drivers (top 20 up / 20 down)
+pc_driver_heatmap(rownames(meta), ntop_all, pc = 1, n = 20,
+                  file  = file.path(outdir, "pca_5_PC1_top20_heatmap.png"),
+                  title = "Top 20 +/- PC1 loading genes (all samples)")
+
+cat("  pca_5_PC1_top20_heatmap.png\n")
+
+## ============================================================
+## (6) Heatmaps for EVERY PCA  (top 20 + bottom 20 PC1 loadings)
+##     One heatmap per PCA, same samples + same ntop as that PCA.
+## ============================================================
+
+## subset vectors computed directly (avoids the with()/lapply scoping issue)
+sub_of <- function(cond) rownames(meta)[cond]
+
+hm_specs <- c(
+  ## (1) all samples
+  list(list(s = rownames(meta),                     ntop = ntop_all,
+            tag = "all_samples",  ttl = "All samples")),
+  ## (2) per line
+  list(list(s = sub_of(meta$geno_line == "OPA1"),   ntop = ntop_sub,
+            tag = "line_OPA1",    ttl = "OPA1 line")),
+  list(list(s = sub_of(meta$geno_line == "ATF4"),   ntop = ntop_sub,
+            tag = "line_ATF4",    ttl = "ATF4 line")),
+  list(list(s = sub_of(meta$geno_line == "AO"),     ntop = ntop_sub,
+            tag = "line_AO",      ttl = "AO line")),
+  ## (3) per diet
+  list(list(s = sub_of(meta$diet == "CD"),          ntop = ntop_all,
+            tag = "diet_CD",      ttl = "CD samples")),
+  list(list(s = sub_of(meta$diet == "HFD"),         ntop = ntop_all,
+            tag = "diet_HFD",     ttl = "HFD samples"))
+)
+
+## (4) per genotype group (6)
+for (g in geno_lv)
+  hm_specs <- c(hm_specs,
+    list(list(s = sub_of(meta$genotype == g),       ntop = ntop_sub,
+              tag = paste0("group_", g),  ttl = g)))
+
+## draw them all
+for (sp in hm_specs) {
+  pc_driver_heatmap(
+    samples = sp$s, ntop = sp$ntop, pc = 1, n = 20,
+    file  = file.path(outdir, paste0("pca_hm_", sp$tag, "_PC1_top20.png")),
+    title = paste0(sp$ttl, " - top20 +/- PC1 loadings"))
+  cat("  pca_hm_", sp$tag, "_PC1_top20.png\n", sep = "")
+}
+
+
+
 
 ```
