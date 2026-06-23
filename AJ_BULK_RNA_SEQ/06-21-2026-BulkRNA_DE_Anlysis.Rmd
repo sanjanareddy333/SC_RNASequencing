@@ -4,178 +4,153 @@ output: html_document
 ---
 
 ```{rsetup }
-# ================================
-# Bulk RNA-seq DE analysis
-# OPA1 KO vs WT, ATF4 KO vs WT, AO KO vs WT
-# ================================
+## ============================================================
+## de_ko_vs_wt_all_samples.R
+## DESeq2 differential expression: KO vs WT within each line
+## (OPA1 / ATF4 / AO), on ALL 43 samples with ORIGINAL labels
+## (NO relabeling, NO removals).
+## Volcano per contrast: top 10 up + top 10 down labeled,
+## Opa1 / Atf4 / Fgf21 always highlighted + labeled.
+## Positive log2FC = UP in KO relative to WT.
+## ============================================================
 
-library(DESeq2)
-library(tidyverse)
-library(ggplot2)
-library(EnhancedVolcano)
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(ggplot2)
+  library(ggrepel)
+})
 
-# ----------------
-# 1. Load counts
-# ----------------
-counts_file <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
+tsv    <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
+outdir <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/DE_ANALYSIS/RELABELED/"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 
-counts_raw <- read.delim(counts_file, check.names = FALSE)
+markers <- c("Opa1", "Atf4", "Fgf21")   # always labeled
+lfc_thr <- 1                              # |log2FC| threshold for coloring
+p_thr   <- 0.05                           # padj threshold
+n_top   <- 10                             # top genes per side to label
 
-# Save gene annotation separately
-gene_info <- counts_raw[, c("gene_id", "gene_name")]
+## ---- 1. Load counts -----------------------------------------------------
+raw <- read.delim(tsv, check.names = FALSE)
+rownames(raw) <- make.unique(raw$gene_name)
+mat <- round(as.matrix(raw[, !(colnames(raw) %in% c("gene_id", "gene_name"))]))
 
-# Use unique gene_id as row names
-rownames(counts_raw) <- counts_raw$gene_id
+## ---- 2. Metadata + apply corrections (relabel + drop partial responders) -
+parts <- strsplit(colnames(mat), "_")
+meta <- data.frame(
+  row.names = colnames(mat),
+  genotype  = vapply(parts, function(x) paste(x[1], x[2], sep = "_"), ""),
+  diet      = vapply(parts, `[`, "", 3),
+  id        = vapply(parts, `[`, "", 4),
+  stringsAsFactors = FALSE
+)
 
-# Remove annotation columns
-counts <- counts_raw[, !(colnames(counts_raw) %in% c("gene_id", "gene_name"))]
+relabel_meta <- function(meta) {
+  swaps <- c("2"="OPA1_KO","A1"="AO_KO","D1"="AO_KO","26"="AO_WT","30"="AO_WT",
+             "13"="ATF4_KO","16"="ATF4_KO","35"="ATF4_WT")
+  hit <- meta$id %in% names(swaps)
+  meta$genotype[hit] <- swaps[meta$id[hit]]
+  meta
+}
+drop_partial_responders <- function(meta)
+  meta[!meta$id %in% c("7","F1","E1","B1","G1"), , drop = FALSE]
 
-# Convert to numeric matrix and round for DESeq2
-counts <- round(as.matrix(counts))
+meta <- relabel_meta(meta)
+meta <- drop_partial_responders(meta)
+mat  <- mat[, rownames(meta)]                       # keep matrix aligned (38)
 
-# Check
-dim(counts)
-head(counts[, 1:5])
+meta$geno_line  <- sub("_.*", "", meta$genotype)    # OPA1 / ATF4 / AO
+meta$geno_short <- factor(sub(".*_", "", meta$genotype), levels = c("WT","KO"))
+meta$diet       <- factor(meta$diet, levels = c("CD","HFD"))
 
-# ----------------
-# 2. Create metadata
-# ----------------
-samples <- colnames(counts)
 
-metadata <- data.frame(sample = samples) %>%
-  mutate(
-    model = case_when(
-      grepl("^O", sample) & !grepl("^AO", sample) ~ "OPA1",
-      grepl("^A", sample) & !grepl("^AO", sample) ~ "ATF4",
-      grepl("^AO", sample) ~ "AO"
-    ),
-    genotype = case_when(
-      grepl("WT", sample) ~ "WT",
-      grepl("KO", sample) ~ "KO"
-    ),
-    diet = case_when(
-      grepl("CD", sample) ~ "CD",
-      grepl("HFD", sample) ~ "HFD"
-    )
-  )
+# ## ---- 2. Metadata from ORIGINAL column names (no corrections) ------------
+# parts <- strsplit(colnames(mat), "_")
+# meta <- data.frame(
+#   row.names = colnames(mat),
+#   genotype  = vapply(parts, function(x) paste(x[1], x[2], sep = "_"), ""),
+#   diet      = vapply(parts, `[`, "", 3),
+#   id        = vapply(parts, `[`, "", 4),
+#   stringsAsFactors = FALSE
+# )
+# meta$geno_line  <- sub("_.*", "", meta$genotype)    # OPA1 / ATF4 / AO
+# meta$geno_short <- factor(sub(".*_", "", meta$genotype), levels = c("WT","KO"))
+# meta$diet       <- factor(meta$diet, levels = c("CD","HFD"))
 
-rownames(metadata) <- metadata$sample
 
-# Make sure sample order matches
-metadata <- metadata[colnames(counts), ]
-
-# ----------------
-# 3. Function for DE
-# ----------------
-run_DE <- function(model_name, output_prefix) {
-  
-  keep_samples <- metadata$model == model_name
-  
-  sub_counts <- counts[, keep_samples]
-  sub_meta <- metadata[keep_samples, ]
-  
-  sub_meta$genotype <- factor(sub_meta$genotype, levels = c("WT", "KO"))
-  sub_meta$diet <- factor(sub_meta$diet, levels = c("CD", "HFD"))
-  
-  dds <- DESeqDataSetFromMatrix(
-    countData = sub_counts,
-    colData = sub_meta,
-    design = ~ diet + genotype
-  )
-  
-  # Filter low-count genes
-  dds <- dds[rowSums(counts(dds)) >= 10, ]
-  
-  dds <- DESeq(dds)
-  
-  res <- results(dds, contrast = c("genotype", "KO", "WT"))
-  res_df <- as.data.frame(res)
-  res_df$gene <- rownames(res_df)
-  
-  res_df <- res_df %>%
-    arrange(padj)
-  
-  write.csv(res_df, paste0(output_prefix, "_DE_results.csv"), row.names = FALSE)
-  
-  sig <- res_df %>%
-    filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) >= 0.58)
-  
-  write.csv(sig, paste0(output_prefix, "_significant_FDR0.05_log2FC0.58.csv"), row.names = FALSE)
-  
-  png(paste0(output_prefix, "_volcano.png"), width = 1000, height = 800)
-  EnhancedVolcano(
-    res_df,
-    lab = res_df$gene,
-    x = "log2FoldChange",
-    y = "padj",
-    title = paste0(output_prefix, " KO vs WT"),
-    pCutoff = 0.05,
-    FCcutoff = 0.58,
-    pointSize = 2,
-    labSize = 3
-  )
-  dev.off()
-  
-  return(res_df)
+## ---- 3. Per-line DE: KO vs WT, controlling for diet ---------------------
+run_de <- function(line) {
+  keep <- rownames(meta)[meta$geno_line == line]
+  cd   <- meta[keep, ]
+  cd$geno_short <- droplevels(cd$geno_short)
+  dds  <- DESeqDataSetFromMatrix(mat[, keep], cd, design = ~ diet + geno_short)
+  dds  <- dds[rowSums(counts(dds) >= 10) >= 3, ]
+  dds  <- DESeq(dds)
+  coef <- "geno_short_KO_vs_WT"
+  res  <- results(dds, name = coef)
+  if (requireNamespace("apeglm", quietly = TRUE))
+    res <- lfcShrink(dds, coef = coef, type = "apeglm")
+  as.data.frame(res)
 }
 
-# ----------------
-# 4. Run comparisons
-# ----------------
-opa1_res <- run_DE("OPA1", "OPA1_KO_vs_WT")
-atf4_res <- run_DE("ATF4", "ATF4_KO_vs_WT")
-ao_res   <- run_DE("AO",   "AO_KO_vs_WT")
+## ---- 4. Volcano --------------------------------------------------------
+make_volcano <- function(res, line) {
+  d <- res
+  d$gene <- rownames(d)
+  d <- d[!is.na(d$padj), ]
+  d$neglog10p <- pmin(-log10(d$padj), 300)
+  d$dir <- "ns"
+  d$dir[d$padj < p_thr & d$log2FoldChange >  lfc_thr] <- "up"
+  d$dir[d$padj < p_thr & d$log2FoldChange < -lfc_thr] <- "down"
 
-# ----------------
-# 5. Check genes of interest
-# ----------------
-genes_interest <- c("Opa1", "Atf4", "Fgf21")
+  ups   <- d[d$dir == "up",   ]; ups   <- ups[order(-ups$log2FoldChange), ]
+  downs <- d[d$dir == "down", ]; downs <- downs[order(downs$log2FoldChange), ]
+  lab_genes <- unique(c(head(ups$gene, n_top), head(downs$gene, n_top),
+                        intersect(markers, d$gene)))
+  d$lab       <- ifelse(d$gene %in% lab_genes, d$gene, "")
+  d$is_marker <- d$gene %in% markers
 
-goi_results <- bind_rows(
-  opa1_res %>% filter(gene %in% genes_interest) %>% mutate(comparison = "OPA1_KO_vs_WT"),
-  atf4_res %>% filter(gene %in% genes_interest) %>% mutate(comparison = "ATF4_KO_vs_WT"),
-  ao_res   %>% filter(gene %in% genes_interest) %>% mutate(comparison = "AO_KO_vs_WT")
-)
+  arr <- arrow(length = unit(0.012, "npc"), type = "closed")
+  ggplot(d, aes(log2FoldChange, neglog10p)) +
+    geom_vline(xintercept = c(-lfc_thr, lfc_thr), linetype = "dashed", color = "grey70") +
+    geom_hline(yintercept = -log10(p_thr),        linetype = "dashed", color = "grey70") +
+    geom_point(aes(color = dir), size = 1.6, alpha = 0.7) +
+    scale_color_manual(values = c(up = "#B2182B", down = "#2166AC", ns = "grey80"),
+                       breaks = c("up","down"), name = NULL,
+                       labels = c("up in KO","down in KO")) +
+    geom_point(data = subset(d, is_marker), shape = 21, fill = "#F2A900",
+               color = "black", size = 3.1, stroke = 0.6) +
+    geom_text_repel(data = subset(d, lab != "" & !is_marker),
+                    aes(label = lab), size = 2.7, color = "grey20",
+                    max.overlaps = Inf, min.segment.length = 0,
+                    segment.size = 0.3, box.padding = 0.4, seed = 1, arrow = arr) +
+    geom_text_repel(data = subset(d, is_marker),
+                    aes(label = gene), size = 3, fontface = "bold",
+                    color = "#7A4D00", max.overlaps = Inf, min.segment.length = 0,
+                    segment.size = 0.3, box.padding = 0.6, seed = 1, arrow = arr) +
+    labs(x = expression(log[2]~fold~change~(KO/WT)),
+         y = expression(-log[10]~adjusted~p),
+         title = sprintf("%s line: KO vs WT  (relabeled, original labels)", line),
+         subtitle = sprintf("%d up / %d down at padj<%.2f & |log2FC|>%g",
+                            sum(d$dir == "up"), sum(d$dir == "down"), p_thr, lfc_thr)) +
+    theme_bw(base_size = 12) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"),
+          legend.position = "top")
+}
 
-#write.csv(goi_results, "genes_of_interest_Opa1_Atf4_Fgf21.csv", row.names = FALSE)
+## ---- 5. Run all three, save tables + volcanoes --------------------------
+for (line in c("OPA1", "ATF4", "AO")) {
+  res <- run_de(line)
+  res <- res[order(res$padj), ]
+  write.csv(data.frame(gene = rownames(res), res, row.names = NULL),
+            file.path(outdir, sprintf("DE_%s_KOvsWT_relabeled.csv", line)), row.names = FALSE)
+  ggsave(file.path(outdir, sprintf("volcano_%s_KOvsWT_relabeled.png", line)),
+         make_volcano(res, line), width = 8, height = 7, dpi = 150)
+  cat(sprintf("%s line: %d genes tested  ->  DE_%s_KOvsWT_relabeled.csv, volcano_%s_KOvsWT_relabeled.png\n",
+              line, nrow(res), line, line))
+}
 
-# ----------------
-# 6. Save metadata
-# ----------------
-write.csv(metadata, "sample_metadata.csv", row.names = FALSE)
 
 
 
-```{r volcano-opa1-labelled, fig.width=10, fig.height=8, message=FALSE, warning=FALSE}
-library(EnhancedVolcano)
-
-# Genes you specifically want to label
-genes_to_label <- c("Opa1", "Atf4", "Fgf21", "Ddit3", "Hspa5", "Trib3", "Asns")
-
-# Add labels only for selected genes + top significant genes
-opa1_plot_df <- opa1_res %>%
-  mutate(
-    label_gene = case_when(
-      gene_name %in% genes_to_label ~ gene_name,
-      !is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 0.58 ~ gene_name,
-      TRUE ~ NA_character_
-    )
-  )
-
-EnhancedVolcano(
-  opa1_plot_df,
-  lab = opa1_plot_df$label_gene,
-  x = "log2FoldChange",
-  y = "padj",
-  title = "OPA1 KO vs WT",
-  subtitle = "Negative log2FC = higher in WT | Positive log2FC = higher in KO",
-  caption = "Contrast: KO vs WT, adjusted for diet",
-  pCutoff = 0.05,
-  FCcutoff = 0.58,
-  pointSize = 2,
-  labSize = 4,
-  drawConnectors = TRUE,
-  widthConnectors = 0.5,
-  max.overlaps = Inf
-)
 ```
