@@ -28,7 +28,7 @@ suppressPackageStartupMessages({
 })
 
 tsv     <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/DATA/salmon.merged.gene_counts_length_scaled.relabeled.tsv"
-outdir   <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/PCA_ANALYSIS"
+outdir   <- "~/Desktop/Lab_Streeter_new/BULKRNASEQ_AJ/RESULTS/PCA_ANALYSIS/RELABELED"
  # writes PNGs to working dir
 ntop_all <- 2000         # genes for full / per-diet PCAs
 ntop_sub <- 1000         # genes for per-line / per-group PCAs
@@ -52,14 +52,31 @@ meta$genotype   <- factor(meta$genotype, levels = geno_lv)
 meta$geno_short <- factor(meta$geno_short, levels = c("WT","KO"))
 meta$diet       <- factor(meta$diet, levels = c("CD","HFD"))
 
-## ---- OPTIONAL: use CORRECTED labels instead -----------------------------
-## cd <- read.csv("colData_corrected.csv", row.names = 1)
-## cd <- cd[cd$status != "remove", ]          # drop excluded partial responders
-## # for PENDING_PCA samples keep their original group so you can SEE them:
-## cd$grp <- ifelse(cd$final_genotype == "PENDING_PCA",
-##                  cd$orig_genotype, cd$final_genotype)
-## mat  <- mat[, rownames(cd)]
-## meta <- meta[rownames(cd), ]; meta$genotype <- factor(cd$grp, levels = geno_lv)
+
+
+
+## ---- 1b. APPLY CORRECTIONS (relabel + drop partial responders) ----------
+## Same calls as the boxplot/DE scripts. Comment this block out to get the
+## original-label PCA back.
+relabel_meta <- function(meta) {
+  swaps <- c("2"="OPA1_KO","A1"="AO_KO","D1"="AO_KO","26"="AO_WT","30"="AO_WT",
+             "13"="ATF4_KO","16"="ATF4_KO","35"="ATF4_WT")
+  hit <- as.character(meta$id) %in% names(swaps)
+  meta$genotype[hit] <- swaps[as.character(meta$id)[hit]]
+  meta
+}
+drop_partial_responders <- function(meta)
+  meta[!as.character(meta$id) %in% c("7","F1","E1","B1","G1"), , drop = FALSE]
+
+meta <- relabel_meta(meta)
+meta <- drop_partial_responders(meta)
+
+## re-sync everything after the edit
+meta$genotype   <- factor(as.character(meta$genotype), levels = geno_lv)
+meta$geno_line  <- sub("_.*", "", as.character(meta$genotype))   # OPA1/ATF4/AO
+meta$geno_short <- factor(sub(".*_", "", as.character(meta$genotype)),
+                          levels = c("WT","KO"))
+mat <- mat[, rownames(meta)]              # keep the matrix aligned (43 -> 38)
 
 ## ---- 2. DESeq2 VST (once, blind) ----------------------------------------
 dds <- DESeqDataSetFromMatrix(round(mat), meta, design = ~ 1)
@@ -196,10 +213,6 @@ pc_driver_heatmap <- function(samples, ntop, pc = 1, n = 20,
            main = title, filename = file, width = 10, height = 9.5)
 }
 
-## Heatmap for the all-samples PCA, PC1 drivers (top 20 up / 20 down)
-pc_driver_heatmap(rownames(meta), ntop_all, pc = 1, n = 20,
-                  file  = file.path(outdir, "pca_5_PC1_top20_heatmap.png"),
-                  title = "Top 20 +/- PC1 loading genes (all samples)")
 
 cat("  pca_5_PC1_top20_heatmap.png\n")
 
